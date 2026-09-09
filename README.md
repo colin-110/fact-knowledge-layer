@@ -263,7 +263,11 @@ _All quotes below are verbatim from the starter dataset PDFs (page numbers as pr
 
 ₹81,415.38 million normalizes to ₹8,141.538 crore - within 0.01% of the ₹8,142 Cr figure (rounding to the
 nearest crore in the investor deck). Same subject, metric, period, and scope; the rule engine fires
-`CORROBORATES` deterministically, no LLM call needed.
+`CORROBORATES` deterministically, no LLM call needed. Confirmed on a live run producing this exact pair; a
+*different* live run (documented in Case 4c below) instead produced a live CORROBORATES between the two
+documents' FY23 EBITDA figures when the revenue page happened to fall inside a rate-limited window - which
+document/page pairing shows up depends on which pages a given run's Groq quota allowed through, not on whether
+the mechanism works.
 
 ### 2. LIKELY_CONTRADICTION - female workforce growth, same report, same page
 
@@ -279,6 +283,19 @@ Same subject/metric/period, no scope or status distinction visible in either pas
 contradiction - the rule engine classifies this `LIKELY_CONTRADICTION` and says so without inventing an
 explanation it can't see in the text.
 
+**Verified against the live system**, not just by reading the PDF - uploading the real Annual Report produced
+exactly this pair as extracted facts, and the rule engine classified them automatically:
+
+```json
+{
+  "relationship_type": "LIKELY_CONTRADICTION",
+  "confidence": 0.6,
+  "fact_a": { "predicate": "female workers increase year-on-year", "raw_value": "60%" },
+  "fact_b": { "predicate": "female workers increase year-on-year (bullet)", "raw_value": "59%" },
+  "reason": "Same subject, metric, period (FY24), scope, and status, but normalized values differ (60.0 vs 59.0 %) with no distinguishing qualifier found - possible rounding or reporting inconsistency."
+}
+```
+
 ### 3. CONTEXT_RECONCILES - India real GDP growth, FY25
 
 - **Economic Survey 2024-25** (`01-india-economic-survey-2024-25-excerpt.pdf`, p.4): *"As per the first advance
@@ -293,30 +310,64 @@ the Economic Survey explicitly flags its number as a *First Advance Estimate* (p
 closed) while RBI and IMF report later, more complete data vintages. Different `status` -> the rule engine
 fires `CONTEXT_RECONCILES` with `context_dimension: estimate_vintage` rather than flagging a contradiction.
 
-### 4. Extraction failure
+### 4. Extraction/reasoning failure - two real ones, both found by actually running the system
 
-**Q4 FY24 Earnings Presentation, page 13**: a combined quarterly/yearly "Adjusted EBITDA (₹ Cr)" bar chart
-(Q1 FY23 - Q4 FY24 plus FY23/FY24 totals) with value and margin labels positioned around the bars and no
-accompanying data table on that page. Plain PyMuPDF text extraction returns the numbers stripped of their
-axis association and partially concatenated - e.g. four distinct quarterly values collapse into a single
-token like `"(125) (67) (25)6"`. The page is correctly flagged `is_visually_complex` and routed to the vision
-LLM fallback; when the model's own confidence for a given chart region comes back low, the system does not
+**(a) Sign lost on a parenthesized negative value.** The Annual Report states FY24 EBITDA as "1,266.41" and FY23
+as "(4,516.08)" (₹ million) - accounting notation where parentheses mean a loss. A live run extracted this as
+`predicate: "EBITDA loss FY23", raw_value: "₹4,516 million", numeric_value: +4516` - the model correctly captured
+the *word* "loss" in the predicate but extracted the *number* as positive, so it normalized to +451.6 crore
+instead of -451.6 crore. Comparing against the Q4 deck's correctly-signed "₹(452) Cr" produced a **CONTRADICTS**
+relationship that isn't a real contradiction at all - both sources agree it's a ~452 crore loss, but one fact's
+sign was silently wrong. *How this was found:* by actually uploading the real PDF and inspecting the resulting
+relationships, not by inspecting code. *Fix applied:* the fact-extraction prompt (`app/pipeline/facts.py`) now
+explicitly states the parentheses-mean-negative convention and to sign `numeric_value` accordingly - documented
+here rather than silently patched over, since this class of error (an LLM getting the qualitative sense right
+but the quantitative encoding wrong) can recur elsewhere and the honest fix is a better prompt, not a claim that
+it's now impossible. Re-run the pipeline to see whether it recurs; if it does, that's still an accurate
+depiction of current recall, not a broken pipeline.
+
+**(b) A genuinely unreadable chart.** Q4 FY24 Earnings Presentation, page 13: a combined quarterly/yearly
+"Adjusted EBITDA (₹ Cr)" bar chart with value and margin labels positioned around the bars and no accompanying
+data table on that page. Plain PyMuPDF text extraction returns the numbers stripped of their axis association
+and partially concatenated - e.g. four distinct quarterly values collapse into a single token like
+`"(125) (67) (25)6"`. The page is correctly flagged `is_visually_complex` and routed through the vision
+provider chain (Groq -> Gemini -> spatial-text reflow); when confidence comes back low, the system does not
 silently drop it or guess - it stores the evidence row as-is (so you can see exactly what was extracted) and
 logs an `extraction_issue` with the reported confidence and uncertainty note, surfaced unfiltered in the
-web UI's **Failures** tab and via `GET /extraction-issues`. This is the intended failure-handling behavior:
-show what was extracted, how confident the system is, and why it might be wrong, rather than hiding it.
+web UI's **Failures** tab and via `GET /extraction-issues`.
+
+**(c) Rate limits, surfaced accurately.** A live 100-page run hit Groq's free-tier quota partway through and
+95 of 100 pages failed fact extraction - and an early version of the failure-logging code was *itself* buggy:
+it built the `extraction_issue` id without the page number, so every page failing with the identical error
+message collided on the same id and got silently deduped by `INSERT OR IGNORE`, making the Failures tab report
+2 issues when the real number was 95. Caught by comparing the job's fact count against an earlier successful
+run's, not by code review. Fixed in `app/pipeline/ingestion.py` - the failure-handling behavior is only useful
+if the failure count itself is trustworthy.
 
 ## Limitations and Next Steps
 
 **Works:**
 - End-to-end pipeline: upload -> async processing -> evidence -> facts -> relationships -> query, all backed by
-  a real job status you can poll.
-- Deterministic, idempotent ingestion (safe to re-upload or resume after a crash).
-- Hybrid retrieval with RRF fusion and reranking.
+  a real job status you can poll. Confirmed on live runs against the actual starter PDFs, not just unit tests.
+- Deterministic, idempotent ingestion (safe to re-upload or resume after a crash) - confirmed with an
+  integration test that reprocesses a fully-completed document and asserts zero new LLM calls.
+- Hybrid retrieval with RRF fusion and reranking - confirmed against a real embedding model + FTS5, including
+  disambiguating two facts that share a superficial "X%" pattern but mean completely different things.
 - Rule-based relationship classification for the confident cases, LLM fallback for the rest, always shown its
-  source evidence rather than reasoning from bare numbers.
+  source evidence rather than reasoning from bare numbers. The 59%/60% LIKELY_CONTRADICTION case fired exactly
+  as designed on a live upload of the real Annual Report (see Case 2 above).
+- 95 tests, all passing without a real API key (unit tests for the deterministic pieces, an end-to-end
+  pipeline test with only the LLM/embedding calls mocked, a retrieval-accuracy test against the real embedding
+  model, and API smoke tests covering malformed input, idempotency, and empty-state behavior).
 
 **Does not work yet / known gaps:**
+- **Groq's free-tier daily token quota (200K tokens/day) is a real, hit-in-testing constraint**, not a
+  theoretical one - a single 100-page document can burn through a meaningful fraction of it, and once hit,
+  every subsequent page fails fact extraction until the quota resets (the Failures tab shows this honestly;
+  earlier in development a bug in the failure-logging itself briefly hid how many pages were actually
+  affected - see Case 4c above). `GROQ_API_KEYS` (multiple comma-separated keys, round-robined with failover)
+  and the Gemini vision fallback both help, but don't eliminate this - a heavier daily-quota tier or a paid
+  key is the real fix for processing many large documents in one session.
 - **Text evidence bbox is page-level, not block-level.** Tables and charts get precise bounding boxes; plain
   narrative text evidence currently points at the whole page rather than the specific sentence, so evidence
   highlighting for text facts is coarser than for tabular/chart facts. The block-level text is captured in
