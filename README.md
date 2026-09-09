@@ -17,20 +17,15 @@ pip install -r requirements.txt
 cp .env.example .env             # then edit .env and set GROQ_API_KEY
 ```
 
-Run the API (this also starts the background ingestion worker in-process):
+Run it (one process serves the API, the background ingestion worker, and the UI):
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-In a second terminal, run the UI:
-
-```bash
-streamlit run streamlit_app.py
-```
-
-Open http://localhost:8501, upload a PDF (any PDF - not limited to the starter dataset), and watch it process. Or
-drive it directly via the API:
+Open http://localhost:8000 - a plain HTML/CSS/JS frontend (no build step, no framework) with Documents, Facts,
+Relationships, Ask, and Failures tabs, polling the API every few seconds so it stays live without manual refresh.
+Upload a PDF (any PDF - not limited to the starter dataset) and watch it process. Or drive it directly via the API:
 
 ```bash
 curl -F "file=@some-report.pdf" http://localhost:8000/documents
@@ -58,7 +53,7 @@ _TODO: link to a ≤3 minute demo video showing a PDF being processed and the fo
 ### Architecture
 
 ```
-                    UPLOAD (API or Streamlit)
+                    UPLOAD (API or web UI)
                               |
                               v
                     FastAPI  ->  202 + job_id
@@ -152,6 +147,14 @@ question -> hybrid retrieval (dense Chroma search + SQLite FTS5 BM25,
   confidently CORROBORATES without ever calling an LLM. Only genuinely ambiguous pairs (different scope, status,
   or a numeric gap with no obvious cause) go to the LLM, and it's given both facts' actual source evidence, not
   just the two numbers, so it can reason about *why* they might differ instead of just noticing that they do.
+- **Concurrent page processing, multi-key failover.** Pages are I/O-bound (waiting on Groq), so a thread pool
+  (`INGESTION_WORKERS`, default 6) processes them concurrently instead of one at a time - this alone took a
+  100-page document from ~20 minutes to under a minute in testing, the rest being a retry bug (see Limitations).
+  `GROQ_API_KEYS` accepts multiple comma-separated keys; calls round-robin across them and fail over to the next
+  key when one is rate-limited or a model is unavailable on it, which both multiplies throughput and daily quota.
+- **Plain HTML/CSS/JS frontend, no framework.** Matches the "smaller, understandable prototype" instruction and
+  removes a dependency (and the auto-refresh problems of Streamlit's rerun model) - the page polls the API every
+  few seconds so job progress and new facts/relationships show up without a manual refresh, with zero build step.
 - **Hybrid retrieval + RRF, not dense-only.** Financial/economic text is full of exact tokens - "FY24", "EBITDA",
   ticker-like codes - that dense embeddings routinely miss and BM25 catches immediately. Reciprocal Rank Fusion
   combines the two ranked lists by rank rather than raw score, so cosine similarity and BM25 scores (different
@@ -194,7 +197,7 @@ Deliberately generic - no field is specific to Delhivery, GDP, or any other docu
 Every fact carries `evidence_ids` pointing at rows in the `evidence` table, each with `document_id`, `page`,
 `evidence_type` (text / table / chart), the exact source text (or the vision model's structured read of a
 chart), an `extraction_method`, a `confidence`, and - for chart/figure evidence - a saved crop of the actual
-page image, servable via `GET /evidence/{id}/artifact` and shown inline in the Streamlit Facts tab. A fact with
+page image, servable via `GET /evidence/{id}/artifact` and shown inline in the Facts tab. A fact with
 no evidence is a schema violation the code cannot produce - `insert_fact` always takes `evidence_ids`.
 
 ### Retrieval
@@ -280,7 +283,7 @@ token like `"(125) (67) (25)6"`. The page is correctly flagged `is_visually_comp
 LLM fallback; when the model's own confidence for a given chart region comes back low, the system does not
 silently drop it or guess - it stores the evidence row as-is (so you can see exactly what was extracted) and
 logs an `extraction_issue` with the reported confidence and uncertainty note, surfaced unfiltered in the
-Streamlit **Failures** tab and via `GET /extraction-issues`. This is the intended failure-handling behavior:
+web UI's **Failures** tab and via `GET /extraction-issues`. This is the intended failure-handling behavior:
 show what was extracted, how confident the system is, and why it might be wrong, rather than hiding it.
 
 ## Limitations and Next Steps

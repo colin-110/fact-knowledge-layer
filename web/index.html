@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fact Knowledge Layer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Fact Knowledge Layer</h1>
+    <p class="subtitle">Upload a PDF, extract evidence-grounded facts, and see how facts corroborate, contradict, or reconcile across documents.</p>
+    <div id="api-status" class="api-status">checking API...</div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="documents">Documents</button>
+    <button class="tab-btn" data-tab="facts">Facts</button>
+    <button class="tab-btn" data-tab="relationships">Relationships</button>
+    <button class="tab-btn" data-tab="ask">Ask</button>
+    <button class="tab-btn" data-tab="failures">Failures</button>
+  </nav>
+
+  <main>
+    <!-- Documents -->
+    <section id="tab-documents" class="tab-panel active">
+      <div class="card">
+        <h2>Upload a PDF</h2>
+        <p class="hint">Any PDF - not limited to the starter dataset.</p>
+        <form id="upload-form">
+          <input type="file" id="file-input" accept="application/pdf" required />
+          <button type="submit" class="btn-primary">Upload and process</button>
+        </form>
+        <div id="upload-error" class="error-box" hidden></div>
+      </div>
+
+      <div class="card" id="active-job-card" hidden>
+        <h2>Processing</h2>
+        <div class="progress-bar"><div id="job-progress-fill" class="progress-fill"></div></div>
+        <div id="job-status-line" class="status-line"></div>
+        <div id="job-error" class="error-box" hidden></div>
+      </div>
+
+      <div class="card">
+        <h2>Documents in the knowledge layer</h2>
+        <table class="data-table" id="documents-table">
+          <thead>
+            <tr><th>Title</th><th>Pages</th><th>Status</th><th>Facts</th><th>Relationships</th><th>Uploaded</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p id="documents-empty" class="empty-msg" hidden>No documents uploaded yet.</p>
+      </div>
+    </section>
+
+    <!-- Facts -->
+    <section id="tab-facts" class="tab-panel">
+      <div class="card">
+        <h2>Search facts</h2>
+        <div class="filter-row">
+          <input type="text" id="fact-search" placeholder="Search subject, predicate, or retrieval text" />
+          <select id="fact-document-filter"><option value="">(all documents)</option></select>
+        </div>
+        <p id="fact-count" class="hint"></p>
+        <div id="facts-list" class="fact-list"></div>
+      </div>
+    </section>
+
+    <!-- Relationships -->
+    <section id="tab-relationships" class="tab-panel">
+      <div class="card">
+        <h2>Cross-document relationships</h2>
+        <select id="relationship-filter">
+          <option value="">(all)</option>
+          <option value="CORROBORATES">CORROBORATES</option>
+          <option value="CONTRADICTS">CONTRADICTS</option>
+          <option value="LIKELY_CONTRADICTION">LIKELY_CONTRADICTION</option>
+          <option value="CONTEXT_RECONCILES">CONTEXT_RECONCILES</option>
+        </select>
+        <p id="relationship-count" class="hint"></p>
+        <div id="relationships-list" class="relationship-list"></div>
+      </div>
+    </section>
+
+    <!-- Ask -->
+    <section id="tab-ask" class="tab-panel">
+      <div class="card">
+        <h2>Ask a question</h2>
+        <form id="ask-form">
+          <input type="text" id="ask-input" placeholder="e.g. What was Delhivery's FY24 revenue?" />
+          <button type="submit" class="btn-primary">Ask</button>
+        </form>
+        <div id="ask-result"></div>
+      </div>
+    </section>
+
+    <!-- Failures -->
+    <section id="tab-failures" class="tab-panel">
+      <div class="card">
+        <h2>Extraction issues and low-confidence results</h2>
+        <p class="hint">Every extraction failure the system noticed is logged here, not hidden - low-confidence chart/figure reads, page processing errors, fact-extraction errors, and unavailable models.</p>
+        <div id="issues-list" class="issues-list"></div>
+        <p id="issues-empty" class="empty-msg" hidden>No extraction issues logged yet.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
