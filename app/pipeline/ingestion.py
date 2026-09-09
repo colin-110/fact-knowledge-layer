@@ -265,40 +265,66 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page, ru
     return facts_extracted
 
 
-def run_relationship_pass(document_id: str, on_progress=None) -> int:
-    """Candidate-match every fact from this document against the whole corpus and classify relationships."""
-    new_fact_rows = storage.list_facts_for_document(document_id)
+def _relate_one_fact(row) -> int:
+    """Candidate-match one fact against the corpus and classify+persist any relationships found."""
+    fact_a = _build_fact_record(row)
+    candidate_ids = candidate_matcher.find_candidates(fact_a, top_k=5)
+    candidate_rows = storage.get_facts_batch(candidate_ids)
     found = 0
-    for row in new_fact_rows:
-        fact_a = _build_fact_record(row)
-        candidate_ids = candidate_matcher.find_candidates(fact_a, top_k=5)
-        candidate_rows = storage.get_facts_batch(candidate_ids)
-        for crow in candidate_rows:
-            fact_b = _build_fact_record(crow)
-            if not relationship_engine.is_plausible_pair(fact_a, fact_b):
-                continue
-            if storage.relationship_exists(fact_a.id, fact_b.id):
-                continue
-            evidence_a_rows = storage.get_evidence_batch(json.loads(row["evidence_ids_json"]))
-            evidence_b_rows = storage.get_evidence_batch(json.loads(crow["evidence_ids_json"]))
-            evidence_a_text = "\n".join(e["text"] or "" for e in evidence_a_rows)
-            evidence_b_text = "\n".join(e["text"] or "" for e in evidence_b_rows)
-            try:
-                classification = relationship_engine.classify_pair(fact_a, fact_b, evidence_a_text, evidence_b_text)
-            except Exception:  # noqa: BLE001
-                continue
-            if classification.relationship_type == "UNRELATED":
-                continue
-            storage.insert_relationship(
-                id=ids.relationship_id(fact_a.id, fact_b.id), fact_a_id=fact_a.id, fact_b_id=fact_b.id,
-                relationship_type=classification.relationship_type, confidence=classification.confidence,
-                context_dimension=classification.context_dimension, reason=classification.reason,
-                method="rule" if classification.confidence >= 0.9 else "llm",
-            )
-            found += 1
+    for crow in candidate_rows:
+        fact_b = _build_fact_record(crow)
+        if not relationship_engine.is_plausible_pair(fact_a, fact_b):
+            continue
+        if storage.relationship_exists(fact_a.id, fact_b.id):
+            continue
+        evidence_a_rows = storage.get_evidence_batch(json.loads(row["evidence_ids_json"]))
+        evidence_b_rows = storage.get_evidence_batch(json.loads(crow["evidence_ids_json"]))
+        evidence_a_text = "\n".join(e["text"] or "" for e in evidence_a_rows)
+        evidence_b_text = "\n".join(e["text"] or "" for e in evidence_b_rows)
+        try:
+            classification = relationship_engine.classify_pair(fact_a, fact_b, evidence_a_text, evidence_b_text)
+        except Exception:  # noqa: BLE001
+            continue
+        if classification.relationship_type == "UNRELATED":
+            continue
+        storage.insert_relationship(
+            id=ids.relationship_id(fact_a.id, fact_b.id), fact_a_id=fact_a.id, fact_b_id=fact_b.id,
+            relationship_type=classification.relationship_type, confidence=classification.confidence,
+            context_dimension=classification.context_dimension, reason=classification.reason,
+            method="rule" if classification.confidence >= 0.9 else "llm",
+        )
+        found += 1
+    return found
+
+
+def run_relationship_pass(document_id: str, on_progress=None) -> int:
+    """Candidate-match every fact from this document against the whole corpus and classify relationships.
+
+    Same rationale as page processing: most of the cost is LLM classification calls on
+    ambiguous pairs (the confident rule-based cases are nearly free), so a thread pool gets
+    real wall-clock benefit here too rather than working through facts one at a time.
+    """
+    new_fact_rows = storage.list_facts_for_document(document_id)
+    if not new_fact_rows:
+        return 0
+
+    total_found = 0
+    lock = threading.Lock()
+
+    def _worker(row):
+        nonlocal total_found
+        found = _relate_one_fact(row)
+        with lock:
+            total_found += found
         if on_progress:
             on_progress()
-    return found
+
+    with ThreadPoolExecutor(max_workers=INGESTION_WORKERS) as pool:
+        futures = [pool.submit(_worker, row) for row in new_fact_rows]
+        for future in as_completed(futures):
+            future.result()
+
+    return total_found
 
 
 def run_document_pipeline(document_id: str, job_id: str, on_stage_update=None):

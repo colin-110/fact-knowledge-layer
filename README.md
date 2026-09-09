@@ -11,21 +11,30 @@ Requires Python 3.11+ and a [Groq API key](https://console.groq.com/keys) (free 
 git clone https://github.com/colin-110/fact-knowledge-layer.git
 cd fact-knowledge-layer
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env             # then edit .env and set GROQ_API_KEY
 ```
 
-Run it (one process serves the API, the background ingestion worker, and the UI):
+Optional in `.env`: `GROQ_API_KEYS` (extra comma-separated Groq keys, round-robined for more throughput/quota)
+and `GEMINI_API_KEY` (free tier at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) - used only
+as a vision fallback for chart/figure pages when Groq has no working vision model on your account/tier).
+
+Run it directly with the venv's own interpreter - this works the same in cmd, PowerShell, and bash, and
+sidesteps PowerShell's script-execution-policy issues with `.venv\Scripts\Activate.ps1`:
 
 ```bash
-uvicorn app.main:app --reload
+# Windows
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+
+# macOS / Linux
+.venv/bin/python -m uvicorn app.main:app --reload
 ```
 
-Open http://localhost:8000 - a plain HTML/CSS/JS frontend (no build step, no framework) with Documents, Facts,
-Relationships, Ask, and Failures tabs, polling the API every few seconds so it stays live without manual refresh.
-Upload a PDF (any PDF - not limited to the starter dataset) and watch it process. Or drive it directly via the API:
+One process serves the API, the background ingestion worker, and the UI. Open **http://localhost:8000** - a
+plain HTML/CSS/JS frontend (no build step, no framework) with Documents, Facts, Relationships, Ask, and Failures
+tabs, polling the API every few seconds so it stays live without a manual refresh. Upload a PDF (any PDF - not
+limited to the starter dataset) and watch it process. Or drive it directly via the API:
 
 ```bash
 curl -F "file=@some-report.pdf" http://localhost:8000/documents
@@ -132,11 +141,16 @@ question -> hybrid retrieval (dense Chroma search + SQLite FTS5 BM25,
   crash doesn't take down the API) without an extra service to run, configure, or explain. Chroma runs embedded
   (no server) for the same reason. This is called out explicitly as the first easy scale-out point in
   Limitations below.
-- **Vision LLM instead of a chart-parsing library.** The starter PDFs (and the ones we'll be tested on) lean
+- **Vision LLM instead of a chart-parsing library, with a two-provider fallback chain.** The starter PDFs lean
   heavily on charts, bar graphs, and infographics with no accompanying text table. A dedicated chart-to-table
   parser is brittle and still needs a fallback for anything it can't handle. Sending the full page image to a
-  vision-capable model and asking it to report low confidence rather than guess turned out to be both simpler
-  to implement and more honest about uncertainty - which matters for the required "extraction failure" case.
+  vision-capable model and asking it to report low confidence rather than guess is both simpler to implement
+  and more honest about uncertainty. In practice, Groq's free tier didn't expose a working vision model on the
+  key used for this submission (confirmed via `client.models.list()`), so `app/pipeline/vision.py` tries Groq
+  first and falls over to Gemini (`GEMINI_API_KEY`, free tier) if Groq has none - and if neither is configured,
+  falls back further to a free, zero-key spatial-text reflow (`app/pipeline/spatial_text.py`) that clusters
+  PyMuPDF's word positions by proximity instead of raw reading order, which recovers a fair amount of structure
+  for any chart whose numbers are real PDF text objects rather than a rasterized image.
 - **Deterministic normalization, LLM-driven extraction.** *What* counts as a fact and its subject/predicate/value
   is entirely up to the LLM (the assignment is explicit that facts shouldn't be hard-coded to any document).
   But *how* ₹81,415 million relates to ₹8,142 crore, or how "FY24" maps to a date range, is arithmetic and
@@ -227,8 +241,14 @@ See **Four Required Cases** below for real output. Summary of the decision logic
 Claude Code (Sonnet 5) wrote essentially all of the implementation in this repository, working from an
 architecture spec I gave it, iterating phase by phase with a commit after each. It also read the starter PDFs
 directly to locate the real facts used in the four required-case demonstrations below (all quotes below are
-verbatim from the source PDFs, not invented). Groq (Llama 3.3 70B for text, Llama 4 Scout for vision) is the
-runtime LLM the *application itself* calls for fact extraction, chart reading, and relationship classification.
+verbatim from the source PDFs, not invented), and diagnosed a couple of live issues by actually running the
+pipeline end-to-end against a real Groq key (a wasted-retry-on-permanent-404 bug, and confirming which models
+the account could actually call via `client.models.list()`, rather than assuming from documentation).
+
+The runtime LLMs the *application itself* calls (never hard-coded, always from `.env`): Groq's
+`openai/gpt-oss-120b` for text (fact extraction, normalization hints, relationship classification) and its
+configured vision model for chart/figure reads, falling over to Google Gemini (`gemini-2.0-flash`) if Groq has
+no working vision model available, and further to a zero-key spatial-text heuristic if neither is configured.
 
 ## Four Required Cases
 
@@ -302,9 +322,13 @@ show what was extracted, how confident the system is, and why it might be wrong,
   highlighting for text facts is coarser than for tabular/chart facts. The block-level text is captured in
   `extractor.py` but not yet threaded through to fact-evidence linking - matching an LLM's `supporting_quote`
   back to its originating text block is the natural next step.
-- **Single background worker.** Documents process one at a time, in one thread. Fine for a prototype; the
-  in-process queue in `app/jobs.py` was written so it's a one-line change to a thread pool, and the interface
-  is narrow enough that swapping in a real task queue later wouldn't touch the pipeline code at all.
+- **Documents queue one at a time, even though pages within a document run concurrently.** `app/jobs.py`'s
+  worker loop pulls one document at a time from the queue; within a document, `run_document_pipeline` processes
+  pages (and later, relationship candidates) through a thread pool (`INGESTION_WORKERS`, default 6), which is
+  what took a 100-page document from ~20 minutes to under a minute in testing. Uploading five documents back to
+  back still processes them one after another rather than all five concurrently - the interface in
+  `app/jobs.py` is narrow enough that swapping the single worker for a small pool of document-level workers
+  later wouldn't touch the pipeline code at all.
 - **No dynamic schema evolution UI.** The fact schema is already generic enough that new kinds of facts don't
   require code changes (qualifiers is free-form JSON), but there's no explicit mechanism for detecting *new
   categories* of predicate and surfacing that to a user - it just silently accumulates whatever predicates the

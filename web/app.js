@@ -51,16 +51,29 @@ function escapeHtml(str) {
 // Tabs
 // ---------------------------------------------------------------------------
 
+const TAB_META = {
+  documents: { title: "Documents", subtitle: "Upload a PDF and track how it's processed into evidence-grounded facts." },
+  facts: { title: "Facts", subtitle: "Every atomic claim extracted so far, each grounded in its source evidence." },
+  relationships: { title: "Relationships", subtitle: "Where facts across documents corroborate, contradict, or reconcile through context." },
+  ask: { title: "Ask", subtitle: "Ask a question and get an answer grounded only in retrieved facts and evidence." },
+  failures: { title: "Failures", subtitle: "Low-confidence reads, unavailable models, and extraction errors - nothing hidden." },
+};
+
 function initTabs() {
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
+  document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
   });
 }
 
 function setActiveTab(tab) {
   activeTab = tab;
-  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${tab}`));
+  const meta = TAB_META[tab];
+  if (meta) {
+    document.getElementById("page-title").textContent = meta.title;
+    document.getElementById("page-subtitle").textContent = meta.subtitle;
+  }
   refreshActiveTab();
 }
 
@@ -135,24 +148,59 @@ function populateDocumentFilter(docs) {
 function setupUploadForm() {
   const form = document.getElementById("upload-form");
   const errorBox = document.getElementById("upload-error");
+  const fileInput = document.getElementById("file-input");
+  const dropzone = document.getElementById("dropzone");
+  const filenameLabel = document.getElementById("dropzone-filename");
+  const uploadBtn = document.getElementById("upload-btn");
+
+  function setSelectedFile(file) {
+    if (file && file.type === "application/pdf") {
+      filenameLabel.textContent = file.name;
+      uploadBtn.disabled = false;
+    } else {
+      filenameLabel.textContent = file ? "Please choose a PDF file." : "";
+      uploadBtn.disabled = true;
+    }
+  }
+
+  fileInput.addEventListener("change", () => setSelectedFile(fileInput.files[0]));
+
+  ["dragenter", "dragover"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    })
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    dropzone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+    })
+  );
+  dropzone.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      fileInput.files = e.dataTransfer.files;
+      setSelectedFile(file);
+    }
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     errorBox.hidden = true;
-    const fileInput = document.getElementById("file-input");
     if (!fileInput.files.length) return;
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
-    const submitBtn = form.querySelector("button");
-    submitBtn.disabled = true;
+    uploadBtn.disabled = true;
     try {
       const result = await apiPostForm("/documents", formData);
       fileInput.value = "";
+      setSelectedFile(null);
       startJobPolling(result.job_id);
     } catch (err) {
       errorBox.textContent = err.message;
       errorBox.hidden = false;
-    } finally {
-      submitBtn.disabled = false;
+      uploadBtn.disabled = false;
     }
   });
 }
@@ -405,8 +453,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   await checkHealth();
   refreshActiveTab();
 
+  // Skip network calls while the tab isn't visible - no point polling a page nobody's
+  // looking at, and it stops piling up requests in a background browser tab.
   autoRefreshTimer = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
     checkHealth();
     refreshActiveTab();
   }, AUTO_REFRESH_MS);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      checkHealth();
+      refreshActiveTab();
+    }
+  });
 });
