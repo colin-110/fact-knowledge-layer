@@ -308,6 +308,19 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 .issue-card .issue-type { font-weight: 600; color: var(--amber); font-size: 12.5px; }
 .issue-card .issue-desc { font-size: 12.5px; margin-top: 4px; color: var(--text-muted); }
 
+.example-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.chip {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: inherit;
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
 #ask-result { margin-top: 18px; }
 #ask-result h3 { font-size: 13px; margin: 18px 0 8px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 650; }
 #ask-result .answer-text { font-size: 14.5px; line-height: 1.55; }

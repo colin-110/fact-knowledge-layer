@@ -266,7 +266,9 @@ async function refreshFacts() {
   } catch {
     return;
   }
-  document.getElementById("fact-count").textContent = `${facts.length} fact(s)`;
+  document.getElementById("fact-count").textContent = facts.length
+    ? `${facts.length} fact(s)`
+    : "No facts match yet - try a different search, or upload a document first.";
   const container = document.getElementById("facts-list");
   container.innerHTML = "";
   for (const f of facts.slice(0, 100)) {
@@ -334,7 +336,9 @@ async function refreshRelationships() {
   } catch {
     return;
   }
-  document.getElementById("relationship-count").textContent = `${rels.length} relationship(s)`;
+  document.getElementById("relationship-count").textContent = rels.length
+    ? `${rels.length} relationship(s)`
+    : "No relationships found yet - they appear once at least two related facts exist.";
   const container = document.getElementById("relationships-list");
   container.innerHTML = "";
   for (const r of rels.slice(0, 100)) {
@@ -367,9 +371,9 @@ async function refreshRelationships() {
 
 function setupAskForm() {
   const form = document.getElementById("ask-form");
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const question = document.getElementById("ask-input").value.trim();
+  const input = document.getElementById("ask-input");
+
+  async function ask(question) {
     if (!question) return;
     const resultBox = document.getElementById("ask-result");
     resultBox.innerHTML = "<p class=\"hint\">Retrieving and reasoning...</p>";
@@ -379,6 +383,18 @@ function setupAskForm() {
     } catch (err) {
       resultBox.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
     }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    ask(input.value.trim());
+  });
+
+  document.querySelectorAll(".chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      input.value = chip.dataset.q;
+      ask(chip.dataset.q);
+    });
   });
 }
 
