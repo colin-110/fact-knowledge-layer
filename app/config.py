@@ -19,6 +19,11 @@ GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "meta-llama/llama-4-scou
 
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
+# Pages are I/O-bound (waiting on Groq API calls), so a thread pool here is a big win -
+# the GIL is released while a thread is blocked on network I/O. Tune down if you're hitting
+# Groq rate limits, up if you have plenty of headroom.
+INGESTION_WORKERS = int(os.environ.get("INGESTION_WORKERS", "6"))
+
 DATABASE_PATH = Path(os.environ.get("DATABASE_PATH", "data/fact_layer.db"))
 if not DATABASE_PATH.is_absolute():
     DATABASE_PATH = BASE_DIR / DATABASE_PATH
