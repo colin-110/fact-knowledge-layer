@@ -35,6 +35,9 @@ Rules:
   (e.g. price basis, currency, methodology note, restated/revised) into "qualifiers" as free-form key-value pairs.
 - "supporting_quote" MUST be a short verbatim substring copied exactly from the source text below (not paraphrased) \
   that contains the number/claim - this is used to locate the evidence, so it must match the source text exactly.
+- Financial reporting convention: a number in parentheses, e.g. "(452)" or "₹(4,516.08)", means NEGATIVE - a loss \
+  or an outflow. Set "numeric_value" to the negative number (e.g. -452, -4516.08) even though "raw_value" can \
+  keep the parenthesized form as written. Do not extract a parenthesized negative value as if it were positive.
 
 This document may be about anything - do not assume it is about any particular company or topic. Let the text \
 itself tell you what facts matter."""
