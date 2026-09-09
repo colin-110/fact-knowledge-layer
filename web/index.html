@@ -92,7 +92,7 @@
                 <tbody></tbody>
               </table>
             </div>
-            <p id="documents-empty" class="empty-msg" hidden>No documents uploaded yet.</p>
+            <p id="documents-empty" class="empty-msg" hidden>No documents yet - drop a PDF above to get started.</p>
           </div>
         </section>
 
@@ -132,6 +132,11 @@
               <input type="text" id="ask-input" placeholder="e.g. What was Delhivery's FY24 revenue?" class="input-wide" />
               <button type="submit" class="btn-primary">Ask</button>
             </form>
+            <div class="example-chips" id="example-chips">
+              <button type="button" class="chip" data-q="What was Delhivery's FY24 revenue?">FY24 revenue</button>
+              <button type="button" class="chip" data-q="How did Delhivery's female workforce change in FY24?">Female workforce growth</button>
+              <button type="button" class="chip" data-q="What was India's real GDP growth in FY25?">India FY25 GDP growth</button>
+            </div>
             <div id="ask-result"></div>
           </div>
         </section>
@@ -144,7 +149,7 @@
               <span class="hint">Nothing is hidden - low-confidence reads, unavailable models, and errors all show up here</span>
             </div>
             <div id="issues-list" class="issues-list"></div>
-            <p id="issues-empty" class="empty-msg" hidden>No extraction issues logged yet.</p>
+            <p id="issues-empty" class="empty-msg" hidden>No extraction issues logged yet - process a document to see this in action.</p>
           </div>
         </section>
       </main>
