@@ -51,6 +51,24 @@ class TestMoneyNormalization:
         assert result.normalized_value is None
         assert result.normalized_unit is None
 
+    def test_negative_value_in_parentheses(self):
+        # Indian financial reporting convention: "Rs. (452 Cr)" for a loss/negative EBITDA.
+        # The LLM is responsible for parsing "(452)" -> numeric_value=-452; normalize_value_unit
+        # just needs to carry the sign correctly through the magnitude conversion.
+        result = normalize_value_unit(-452, "Cr", "Rs. (452 Cr)")
+        assert result.normalized_unit == "INR crore"
+        assert result.normalized_value == pytest.approx(-452)
+
+    def test_negative_value_corroborates_with_matching_negative(self):
+        a = normalize_value_unit(-452, "Cr", "(452 Cr)")
+        b = normalize_value_unit(-4520, "million", "(4,520) million")
+        assert a.normalized_value == pytest.approx(b.normalized_value)
+
+    def test_zero_value(self):
+        result = normalize_value_unit(0, "%", "0%")
+        assert result.normalized_value == 0
+        assert result.normalized_unit == "%"
+
 
 class TestPeriodNormalization:
     def test_fy_two_digit(self):
