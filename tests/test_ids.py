@@ -27,6 +27,16 @@ def test_evidence_id_differs_by_type():
     assert text_ev != table_ev
 
 
+def test_evidence_id_differs_by_page_even_with_identical_seed():
+    """Regression: an extraction_issue id built with a hardcoded page_number=0 collided across
+    every page that failed with the same error message (e.g. a sustained rate limit), so
+    INSERT OR IGNORE silently dropped all but the first - undercounting real failures. The id
+    must vary by page even when the seed text (the exception message) is identical."""
+    page_5 = evidence_id("doc_a", 5, "fact_extraction_error", 0, "rate limited")
+    page_6 = evidence_id("doc_a", 6, "fact_extraction_error", 0, "rate limited")
+    assert page_5 != page_6
+
+
 def test_fact_id_idempotent_reprocessing():
     """Reprocessing the same document/evidence/claim must produce the same fact id,
     so INSERT OR REPLACE overwrites rather than duplicates."""
