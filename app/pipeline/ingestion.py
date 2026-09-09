@@ -1,15 +1,25 @@
 """Top-level per-document pipeline orchestration.
 
-Runs page by page, persisting after every stage so a crash mid-document only
-loses the current page's work (pages already marked processed are skipped on
-retry - see `run_document_pipeline`).
+Pages are processed concurrently (a thread pool, not one at a time) because
+the actual cost per page is almost entirely waiting on Groq API calls -
+network I/O releases the GIL, so threads are a real win here without needing
+multiprocessing. Each page still persists its own evidence/facts as soon as
+it finishes, so a crash mid-document only loses whatever pages were still
+in flight (pages already marked processed are skipped on retry).
+
+Two LLM calls per page in the common case (one combined text+table fact
+extraction call, one vision call only on visually-complex pages) rather than
+one call per table - merging table text into the same extraction call cut
+per-page LLM calls roughly 2-3x on table-heavy pages.
 """
 
 import json
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from app import embeddings, ids, storage
-from app.config import CHARTS_DIR
+from app import embeddings, ids, llm, storage
+from app.config import CHARTS_DIR, GROQ_VISION_MODEL, INGESTION_WORKERS
 from app.pipeline import candidate_matcher, chunks, extractor, facts as fact_extraction, normalize
 from app.pipeline import relationship_engine, vision
 from app.pipeline.candidate_matcher import FactRecord
@@ -35,13 +45,15 @@ def _build_fact_record(row) -> FactRecord:
     )
 
 
-def _persist_facts_from_text(document_id: str, document_title: str, evidence_id: str, evidence_text: str) -> int:
+def _persist_facts_from_text(
+    document_id: str, document_title: str, evidence_ids: list[str], source_text: str
+) -> int:
     try:
-        extracted = fact_extraction.extract_facts_from_text(evidence_text, document_context=document_title)
+        extracted = fact_extraction.extract_facts_from_text(source_text, document_context=document_title)
     except Exception as exc:  # noqa: BLE001
         storage.insert_extraction_issue(
             id=ids.evidence_id(document_id, 0, "fact_extraction_error", 0, str(exc)),
-            document_id=document_id, page_id=None, evidence_id=evidence_id,
+            document_id=document_id, page_id=None, evidence_id=evidence_ids[0] if evidence_ids else None,
             issue_type="fact_extraction_error", description=str(exc)[:500], confidence=None,
         )
         return 0
@@ -53,7 +65,7 @@ def _persist_facts_from_text(document_id: str, document_title: str, evidence_id:
         norm_period = normalize.normalize_period(ef.period_label)
         status = ef.status or normalize.infer_status(ef.raw_value, ef.period_label, str(ef.qualifiers))
 
-        fid = ids.fact_id(document_id, [evidence_id], ef.subject, ef.predicate, ef.raw_value, ef.period_label or "")
+        fid = ids.fact_id(document_id, evidence_ids, ef.subject, ef.predicate, ef.raw_value, ef.period_label or "")
         retrieval_text = chunks.build_fact_retrieval_text(
             document_title, ef.subject, ef.predicate, ef.raw_value, ef.raw_unit,
             norm_unit.normalized_value, norm_unit.normalized_unit, norm_period.period_label, ef.scope, status,
@@ -64,7 +76,7 @@ def _persist_facts_from_text(document_id: str, document_title: str, evidence_id:
             normalized_value=norm_unit.normalized_value, normalized_unit=norm_unit.normalized_unit,
             period_start=norm_period.period_start, period_end=norm_period.period_end,
             period_label=norm_period.period_label, scope=ef.scope, status=status, qualifiers=ef.qualifiers,
-            evidence_ids=[evidence_id], source_method="llm", extraction_confidence=0.8,
+            evidence_ids=evidence_ids, source_method="llm", extraction_confidence=0.8,
             retrieval_text=retrieval_text,
         )
         fact_ids.append(fid)
@@ -80,7 +92,36 @@ def _persist_facts_from_text(document_id: str, document_title: str, evidence_id:
     return count
 
 
-def _process_page(document_id: str, document_title: str, pdf_path: str, page) -> int:
+class _RunState:
+    """Shared, lock-guarded counters/flags for one document's concurrent page workers."""
+
+    def __init__(self, job_id: str, total_pages: int):
+        self.lock = threading.Lock()
+        self.job_id = job_id
+        self.total_pages = total_pages
+        self.pages_processed = 0
+        self.facts_extracted = 0
+        self.vision_issue_logged = False
+
+    def record_page_done(self, facts_from_page: int):
+        with self.lock:
+            self.pages_processed += 1
+            self.facts_extracted += facts_from_page
+            progress = int(70 * self.pages_processed / max(self.total_pages, 1))
+            storage.update_job(
+                self.job_id, pages_processed=self.pages_processed,
+                facts_extracted=self.facts_extracted, progress=progress,
+            )
+
+    def maybe_log_vision_unavailable_once(self, document_id: str, page_id: str):
+        with self.lock:
+            if self.vision_issue_logged:
+                return False
+            self.vision_issue_logged = True
+            return True
+
+
+def _process_page(document_id: str, document_title: str, pdf_path: str, page, run_state: _RunState) -> int:
     page_id = ids.page_id(document_id, page.pdf_page_number)
     storage.upsert_page(
         id=page_id, document_id=document_id, pdf_page_number=page.pdf_page_number,
@@ -90,6 +131,8 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page) ->
 
     facts_extracted = 0
     evidence_ids_batch, evidence_texts_batch, evidence_metas_batch = [], [], []
+    combined_text_parts: list[str] = []
+    combined_evidence_ids: list[str] = []
 
     if page.raw_text and page.raw_text.strip():
         text_ev_id = ids.evidence_id(document_id, page.pdf_page_number, "text", 0, page.raw_text)
@@ -102,7 +145,8 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page) ->
         evidence_metas_batch.append({
             "document_id": document_id, "evidence_id": text_ev_id, "page": page.pdf_page_number, "content_type": "evidence",
         })
-        facts_extracted += _persist_facts_from_text(document_id, document_title, text_ev_id, page.raw_text)
+        combined_text_parts.append(page.raw_text)
+        combined_evidence_ids.append(text_ev_id)
 
     for i, table in enumerate(page.tables):
         table_text = extractor.serialize_table(table.rows)
@@ -116,7 +160,14 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page) ->
         evidence_metas_batch.append({
             "document_id": document_id, "evidence_id": table_ev_id, "page": page.pdf_page_number, "content_type": "evidence",
         })
-        facts_extracted += _persist_facts_from_text(document_id, document_title, table_ev_id, table_text)
+        combined_text_parts.append(f"--- TABLE {i + 1} ---\n{table_text}")
+        combined_evidence_ids.append(table_ev_id)
+
+    # One fact-extraction call for the whole page (text + all tables together) instead of
+    # one call per evidence unit - this is the single biggest reduction in LLM call count.
+    if combined_text_parts:
+        combined_text = "\n\n".join(combined_text_parts)
+        facts_extracted += _persist_facts_from_text(document_id, document_title, combined_evidence_ids, combined_text)
 
     if page.is_visually_complex:
         try:
@@ -126,33 +177,62 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page) ->
             artifact_path = chart_dir / f"page_{page.pdf_page_number}.png"
             artifact_path.write_bytes(png_bytes)
 
-            chart_result = vision.extract_chart_data(png_bytes, page.raw_text)
-            chart_text = chart_result.values_text or ""
-            summary_bits = [b for b in [chart_result.title, chart_text, chart_result.source_note] if b]
-            chart_summary = "\n".join(summary_bits) or "(vision model found no extractable chart data on this page)"
-
-            chart_ev_id = ids.evidence_id(document_id, page.pdf_page_number, "chart", 0, chart_summary)
-            storage.insert_evidence(
-                id=chart_ev_id, document_id=document_id, page_id=page_id, evidence_type="chart",
-                text=chart_summary, bbox=None, artifact_path=str(artifact_path),
-                extraction_method="vision_llm", confidence=chart_result.confidence,
-            )
-            evidence_ids_batch.append(chart_ev_id)
-            evidence_texts_batch.append(chunks.build_evidence_retrieval_text(document_title, page.pdf_page_number, chart_summary))
-            evidence_metas_batch.append({
-                "document_id": document_id, "evidence_id": chart_ev_id, "page": page.pdf_page_number, "content_type": "evidence",
-            })
-
-            if not chart_result.has_extractable_data or chart_result.confidence < CHART_CONFIDENCE_THRESHOLD:
-                storage.insert_extraction_issue(
-                    id=ids.evidence_id(document_id, page.pdf_page_number, "low_confidence_chart", 0, chart_summary),
-                    document_id=document_id, page_id=page_id, evidence_id=chart_ev_id,
-                    issue_type="low_confidence_visual_extraction",
-                    description=chart_result.uncertainty_note or "Vision model could not confidently extract chart data.",
-                    confidence=chart_result.confidence,
+            if llm.is_model_dead(GROQ_VISION_MODEL):
+                # Already confirmed unusable earlier in this run - keep the page image (still useful
+                # for manual inspection in the UI) but don't waste a call we know will fail.
+                chart_ev_id = ids.evidence_id(document_id, page.pdf_page_number, "chart", 0, "vision_unavailable")
+                storage.insert_evidence(
+                    id=chart_ev_id, document_id=document_id, page_id=page_id, evidence_type="chart",
+                    text=None, bbox=None, artifact_path=str(artifact_path),
+                    extraction_method="vision_llm_unavailable", confidence=None,
                 )
+                if run_state.maybe_log_vision_unavailable_once(document_id, page_id):
+                    storage.insert_extraction_issue(
+                        id=ids.evidence_id(document_id, 0, "vision_model_unavailable", 0, GROQ_VISION_MODEL),
+                        document_id=document_id, page_id=page_id, evidence_id=chart_ev_id,
+                        issue_type="vision_model_unavailable",
+                        description=(
+                            f"'{GROQ_VISION_MODEL}' is not available on this Groq API key/tier - confirmed on an "
+                            f"earlier page this run. Visually-complex pages (this and any others) fall back to "
+                            f"plain-text evidence only; the rendered page image is still saved for manual review."
+                        ),
+                        confidence=None,
+                    )
             else:
-                facts_extracted += _persist_facts_from_text(document_id, document_title, chart_ev_id, chart_summary)
+                chart_result = vision.extract_chart_data(png_bytes, page.raw_text)
+                chart_text = chart_result.values_text or ""
+                summary_bits = [b for b in [chart_result.title, chart_text, chart_result.source_note] if b]
+                chart_summary = "\n".join(summary_bits) or "(vision model found no extractable chart data on this page)"
+
+                chart_ev_id = ids.evidence_id(document_id, page.pdf_page_number, "chart", 0, chart_summary)
+                storage.insert_evidence(
+                    id=chart_ev_id, document_id=document_id, page_id=page_id, evidence_type="chart",
+                    text=chart_summary, bbox=None, artifact_path=str(artifact_path),
+                    extraction_method="vision_llm", confidence=chart_result.confidence,
+                )
+                evidence_ids_batch.append(chart_ev_id)
+                evidence_texts_batch.append(chunks.build_evidence_retrieval_text(document_title, page.pdf_page_number, chart_summary))
+                evidence_metas_batch.append({
+                    "document_id": document_id, "evidence_id": chart_ev_id, "page": page.pdf_page_number, "content_type": "evidence",
+                })
+
+                if not chart_result.has_extractable_data or chart_result.confidence < CHART_CONFIDENCE_THRESHOLD:
+                    storage.insert_extraction_issue(
+                        id=ids.evidence_id(document_id, page.pdf_page_number, "low_confidence_chart", 0, chart_summary),
+                        document_id=document_id, page_id=page_id, evidence_id=chart_ev_id,
+                        issue_type="low_confidence_visual_extraction",
+                        description=chart_result.uncertainty_note or "Vision model could not confidently extract chart data.",
+                        confidence=chart_result.confidence,
+                    )
+                else:
+                    facts_extracted += _persist_facts_from_text(document_id, document_title, [chart_ev_id], chart_summary)
+        except llm.ModelUnavailableError as exc:
+            if run_state.maybe_log_vision_unavailable_once(document_id, page_id):
+                storage.insert_extraction_issue(
+                    id=ids.evidence_id(document_id, page.pdf_page_number, "vision_error", 0, str(exc)),
+                    document_id=document_id, page_id=page_id, evidence_id=None,
+                    issue_type="vision_model_unavailable", description=str(exc)[:500], confidence=None,
+                )
         except Exception as exc:  # noqa: BLE001
             storage.insert_extraction_issue(
                 id=ids.evidence_id(document_id, page.pdf_page_number, "vision_error", 0, str(exc)),
@@ -219,29 +299,36 @@ def run_document_pipeline(document_id: str, job_id: str, on_stage_update=None):
     total_pages = len(pages)
     storage.update_job(job_id, total_pages=total_pages, stage="processing_pages")
 
-    pages_processed = 0
-    facts_extracted = 0
-
+    pages_to_process = []
+    already_done = 0
     for page in pages:
         existing = storage.get_page(document_id, page.pdf_page_number)
         if existing is not None and existing["processed_at"]:
-            pages_processed += 1
-            continue
+            already_done += 1
+        else:
+            pages_to_process.append(page)
+
+    run_state = _RunState(job_id, total_pages)
+    run_state.pages_processed = already_done
+
+    def _worker(page):
         try:
-            facts_extracted += _process_page(document_id, document_title, pdf_path, page)
+            facts = _process_page(document_id, document_title, pdf_path, page, run_state)
         except Exception:  # noqa: BLE001
             storage.insert_extraction_issue(
                 id=ids.evidence_id(document_id, page.pdf_page_number, "page_error", 0, traceback.format_exc()[:200]),
                 document_id=document_id, page_id=ids.page_id(document_id, page.pdf_page_number), evidence_id=None,
                 issue_type="page_processing_error", description=traceback.format_exc()[:1000], confidence=None,
             )
-        pages_processed += 1
-        progress = int(70 * pages_processed / max(total_pages, 1))
-        storage.update_job(
-            job_id, pages_processed=pages_processed, facts_extracted=facts_extracted, progress=progress,
-        )
+            facts = 0
+        run_state.record_page_done(facts)
         if on_stage_update:
             on_stage_update()
+
+    with ThreadPoolExecutor(max_workers=INGESTION_WORKERS) as pool:
+        futures = [pool.submit(_worker, page) for page in pages_to_process]
+        for future in as_completed(futures):
+            future.result()  # re-raise any programming error that escaped _worker's own try/except
 
     storage.update_job(job_id, stage="finding_relationships", progress=75)
     relationships_found = run_relationship_pass(document_id)
