@@ -359,6 +359,12 @@ def run_document_pipeline(document_id: str, job_id: str, on_stage_update=None):
 
     run_state = _RunState(job_id, total_pages)
     run_state.pages_processed = already_done
+    if already_done:
+        # Persist immediately: if every page turns out already-processed (a full resume-skip,
+        # or - as a test caught - reprocessing a fully-completed document), no worker ever
+        # runs to report progress, and the job row would otherwise be left showing 0 pages
+        # processed even though the document is actually complete.
+        storage.update_job(job_id, pages_processed=already_done, progress=int(70 * already_done / max(total_pages, 1)))
 
     def _worker(page):
         try:
