@@ -69,10 +69,15 @@ def _score_complexity(page: pymupdf.Page, raw_text: str) -> tuple[bool, str]:
 
     area = max(page.rect.width * page.rect.height, 1.0)
     text_density = len(raw_text) / area
-    if text_density < 0.03 and len(raw_text.strip()) < 400:
-        reasons.append(f"low text density ({text_density:.4f})")
+    # Low density alone must NOT mark a page complex - a genuinely blank page (no text, no
+    # images, no real drawings) has low density too, and there's nothing there for a vision
+    # call to read. Only count it when something is actually visually present alongside the
+    # sparse text (an image, or enough vector drawing ops to suggest a lightweight chart).
+    is_sparse_but_visual = text_density < 0.03 and len(raw_text.strip()) < 400 and (len(images) >= 1 or len(drawings) >= 5)
+    if is_sparse_but_visual:
+        reasons.append(f"low text density ({text_density:.4f}) alongside visual content")
 
-    is_complex = len(reasons) >= 1 and (len(images) >= 1 or len(drawings) >= 40 or text_density < 0.03)
+    is_complex = len(images) >= 1 or len(drawings) >= 40 or is_sparse_but_visual
     return is_complex, "; ".join(reasons)
 
 
@@ -106,8 +111,14 @@ def extract_document(pdf_path: str) -> list[PageData]:
         ]
         is_complex, reason = _score_complexity(page, raw_text)
 
+        # Try table extraction on any page with enough digits to plausibly contain one - NOT
+        # gated on the literal word "table"/"chart" appearing nearby. A financial statement
+        # page (Balance Sheet, Statement of Profit and Loss) is exactly a table but essentially
+        # never uses that word, and missing those pages means missing the headline numbers a
+        # cross-document comparison most needs. pdfplumber's find_tables() on one page is cheap
+        # relative to the LLM calls that dominate wall-clock time, so this is a safe trade.
         tables: list[TableData] = []
-        if CHART_KEYWORDS.search(raw_text) or "table" in raw_text.lower()[:2000]:
+        if sum(c.isdigit() for c in raw_text) >= 6:
             tables = _extract_tables_for_page(pdf_path, i)
             if tables:
                 reason = (reason + "; " if reason else "") + f"{len(tables)} table(s) detected"
