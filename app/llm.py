@@ -25,10 +25,11 @@ import re
 import time
 from typing import Type, TypeVar
 
+import requests
 from groq import APIStatusError, Groq
 from pydantic import BaseModel, ValidationError
 
-from app.config import GROQ_API_KEYS, GROQ_TEXT_MODEL, GROQ_VISION_MODEL
+from app.config import GEMINI_API_KEY, GEMINI_VISION_MODEL, GROQ_API_KEYS, GROQ_TEXT_MODEL, GROQ_VISION_MODEL
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -238,3 +239,83 @@ def is_model_dead(model: str) -> bool:
     except RuntimeError:
         return False
     return not any(_key_is_usable(i, model) for i in range(num_keys))
+
+
+# ---------------------------------------------------------------------------
+# Gemini - vision fallback for when Groq has no working vision model.
+#
+# A separate, deliberately simpler path (single key, no round-robin) since it
+# only needs to serve as a fallback, not the primary provider. Plain REST via
+# `requests` rather than the Gemini SDK, to avoid a heavy new dependency for
+# one endpoint.
+# ---------------------------------------------------------------------------
+
+_GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+_GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+class GeminiUnavailableError(RuntimeError):
+    """Raised when Gemini can't serve this call (no key configured, or the call failed)."""
+
+
+def gemini_configured() -> bool:
+    return bool(GEMINI_API_KEY)
+
+
+def complete_json_with_image_gemini(
+    system_prompt: str, user_prompt: str, image_bytes: bytes, schema: Type[T],
+    model: str | None = None, max_retries: int = 2,
+) -> T:
+    if not GEMINI_API_KEY:
+        raise GeminiUnavailableError("GEMINI_API_KEY is not set.")
+
+    model = model or GEMINI_VISION_MODEL
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    schema_hint = (
+        f"Respond with ONLY a single JSON object matching this shape "
+        f"(omit fields you cannot determine; never invent numbers you cannot actually read):\n"
+        f"{json.dumps(schema.model_json_schema())}"
+    )
+    url = _GEMINI_ENDPOINT.format(model=model)
+    payload = {
+        "systemInstruction": {"parts": [{"text": f"{system_prompt}\n\n{schema_hint}"}]},
+        "contents": [
+            {
+                "parts": [
+                    {"text": user_prompt},
+                    {"inline_data": {"mime_type": "image/png", "data": b64}},
+                ]
+            }
+        ],
+        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.1},
+    }
+
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                json=payload, timeout=60,
+            )
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < max_retries - 1:
+                time.sleep(min(2**attempt, 8))
+            continue
+
+        if resp.status_code == 200:
+            try:
+                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return schema.model_validate(_extract_json(text))
+            except (ValueError, KeyError, IndexError, ValidationError, json.JSONDecodeError) as exc:
+                last_error = exc
+                if attempt < max_retries - 1:
+                    continue
+                raise GeminiUnavailableError(f"Gemini returned unparseable output: {exc}") from exc
+
+        last_error = RuntimeError(f"Gemini call failed ({resp.status_code}): {resp.text[:300]}")
+        if resp.status_code not in _GEMINI_RETRYABLE_STATUS or attempt == max_retries - 1:
+            raise GeminiUnavailableError(str(last_error)) from last_error
+        time.sleep(min(2**attempt, 8))
+
+    raise GeminiUnavailableError(f"Gemini call failed after {max_retries} attempts: {last_error}")

@@ -22,6 +22,7 @@ from app import embeddings, ids, llm, storage
 from app.config import CHARTS_DIR, GROQ_VISION_MODEL, INGESTION_WORKERS
 from app.pipeline import candidate_matcher, chunks, extractor, facts as fact_extraction, normalize
 from app.pipeline import relationship_engine, vision
+from app.pipeline import spatial_text as spatial_text_mod
 from app.pipeline.candidate_matcher import FactRecord
 
 CHART_CONFIDENCE_THRESHOLD = 0.35
@@ -177,29 +178,46 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page, ru
             artifact_path = chart_dir / f"page_{page.pdf_page_number}.png"
             artifact_path.write_bytes(png_bytes)
 
-            if llm.is_model_dead(GROQ_VISION_MODEL):
-                # Already confirmed unusable earlier in this run - keep the page image (still useful
-                # for manual inspection in the UI) but don't waste a call we know will fail.
+            # Reflow this page's text by spatial position rather than raw reading order - a
+            # bar chart's value labels scattered around the page often read back scrambled in
+            # block order but land near their axis label once grouped by proximity. Free (no
+            # API call), degrades to "" for scanned/rasterized pages with no text layer.
+            spatial_text = spatial_text_mod.extract_clustered_text(pdf_path, page.pdf_page_number)
+
+            if not vision.vision_available():
+                # Already confirmed unusable earlier in this run (Groq dead and no Gemini key) -
+                # keep the page image (still useful for manual inspection) but don't waste a call
+                # we know will fail. Still worth a fact-extraction pass over the spatially-reflowed
+                # text, since that's strictly better-ordered than the raw text already tried above.
                 chart_ev_id = ids.evidence_id(document_id, page.pdf_page_number, "chart", 0, "vision_unavailable")
                 storage.insert_evidence(
                     id=chart_ev_id, document_id=document_id, page_id=page_id, evidence_type="chart",
-                    text=None, bbox=None, artifact_path=str(artifact_path),
-                    extraction_method="vision_llm_unavailable", confidence=None,
+                    text=spatial_text or None, bbox=None, artifact_path=str(artifact_path),
+                    extraction_method="spatial_text_fallback" if spatial_text else "vision_llm_unavailable",
+                    confidence=0.4 if spatial_text else None,
                 )
+                if spatial_text and len(spatial_text) > 20:
+                    evidence_ids_batch.append(chart_ev_id)
+                    evidence_texts_batch.append(chunks.build_evidence_retrieval_text(document_title, page.pdf_page_number, spatial_text))
+                    evidence_metas_batch.append({
+                        "document_id": document_id, "evidence_id": chart_ev_id, "page": page.pdf_page_number, "content_type": "evidence",
+                    })
+                    facts_extracted += _persist_facts_from_text(document_id, document_title, [chart_ev_id], spatial_text)
                 if run_state.maybe_log_vision_unavailable_once(document_id, page_id):
                     storage.insert_extraction_issue(
                         id=ids.evidence_id(document_id, 0, "vision_model_unavailable", 0, GROQ_VISION_MODEL),
                         document_id=document_id, page_id=page_id, evidence_id=chart_ev_id,
                         issue_type="vision_model_unavailable",
                         description=(
-                            f"'{GROQ_VISION_MODEL}' is not available on this Groq API key/tier - confirmed on an "
-                            f"earlier page this run. Visually-complex pages (this and any others) fall back to "
-                            f"plain-text evidence only; the rendered page image is still saved for manual review."
+                            f"Neither '{GROQ_VISION_MODEL}' nor Gemini (no GEMINI_API_KEY configured) is "
+                            f"available - confirmed on an earlier page this run. Visually-complex pages (this "
+                            f"and any others) fall back to spatially-reflowed text extraction instead of a "
+                            f"real chart read; the rendered page image is still saved for manual review."
                         ),
                         confidence=None,
                     )
             else:
-                chart_result = vision.extract_chart_data(png_bytes, page.raw_text)
+                chart_result = vision.extract_chart_data(png_bytes, spatial_text or page.raw_text)
                 chart_text = chart_result.values_text or ""
                 summary_bits = [b for b in [chart_result.title, chart_text, chart_result.source_note] if b]
                 chart_summary = "\n".join(summary_bits) or "(vision model found no extractable chart data on this page)"
