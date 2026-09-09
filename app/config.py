@@ -14,6 +14,14 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 CHARTS_DIR = DATA_DIR / "charts"
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+
+# Optional: comma-separated list of additional Groq API keys (e.g. from separate free-tier
+# accounts). Calls round-robin across all configured keys and fail over to the next key when
+# one is rate-limited or its model is unavailable - a simple way to multiply daily quota and
+# concurrent throughput without any other infra. GROQ_API_KEY is always included first if set.
+_extra_keys = [k.strip() for k in os.environ.get("GROQ_API_KEYS", "").split(",") if k.strip()]
+GROQ_API_KEYS = ([GROQ_API_KEY] if GROQ_API_KEY else []) + [k for k in _extra_keys if k != GROQ_API_KEY]
+
 GROQ_TEXT_MODEL = os.environ.get("GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 

@@ -5,6 +5,11 @@ one for vision (image + text) completions. Both validate the response against
 a Pydantic model and retry once with a corrective prompt on malformed output,
 so callers never have to deal with raw JSON parsing.
 
+Supports multiple API keys (GROQ_API_KEYS, comma-separated) round-robined
+across calls, with automatic failover to the next key when one is rate-limited
+or a model is unavailable on it - a simple way to multiply daily quota and
+concurrent throughput without any other infra.
+
 Retries are reserved for genuinely transient errors (rate limits, 5xx,
 network blips). A 404/400 (bad model name, malformed request) will never
 succeed on retry, so it fails immediately instead of burning ~7s of sleep
@@ -14,6 +19,7 @@ unavailable vision model three times before giving up.
 """
 
 import base64
+import itertools
 import json
 import re
 import time
@@ -22,26 +28,34 @@ from typing import Type, TypeVar
 from groq import APIStatusError, Groq
 from pydantic import BaseModel, ValidationError
 
-from app.config import GROQ_API_KEY, GROQ_TEXT_MODEL, GROQ_VISION_MODEL
+from app.config import GROQ_API_KEYS, GROQ_TEXT_MODEL, GROQ_VISION_MODEL
 
 T = TypeVar("T", bound=BaseModel)
 
-_client: Groq | None = None
+_clients: list[Groq] = []
 
 _RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 # A 429 with a long retry-after (e.g. a daily token-quota exhaustion, not a brief burst
-# limit) will never succeed within our short backoff window - fail every concurrent call
-# fast instead of each independently sleeping and retrying into a wall that won't move.
+# limit) will never succeed within our short backoff window - fail over to the next key
+# (or fail fast if there is none) instead of retrying into a wall that won't move.
 _RATE_LIMIT_FAIL_FAST_THRESHOLD_SECONDS = 20.0
 
-# Once a model name proves permanently unusable (e.g. 404 model_not_found) for this
-# process, stop trying it again - this is the circuit breaker that saves ~7s per page
-# on a document where the vision model is unavailable for the whole run.
-_DEAD_MODELS: set[str] = set()
+# Per-key-index state: a model that 404s on key #0 might still work fine on key #1 (e.g.
+# different account tiers), so dead/rate-limited status is tracked per (key_index, model).
+_DEAD_MODELS: dict[int, set[str]] = {}
+_RATE_LIMITED_UNTIL: dict[tuple[int, str], float] = {}
 
-# model -> unix timestamp before which calls to it should fail immediately rather than retry.
-_RATE_LIMITED_UNTIL: dict[str, float] = {}
+_round_robin = itertools.count()
+
+
+def _get_clients() -> list[Groq]:
+    global _clients
+    if not _clients:
+        if not GROQ_API_KEYS:
+            raise RuntimeError("GROQ_API_KEY is not set. Copy .env.example to .env and fill it in.")
+        _clients = [Groq(api_key=key) for key in GROQ_API_KEYS]
+    return _clients
 
 
 def _parse_retry_after_seconds(exc: Exception) -> float | None:
@@ -63,16 +77,8 @@ def _parse_retry_after_seconds(exc: Exception) -> float | None:
 
 
 class ModelUnavailableError(RuntimeError):
-    """Raised immediately (no retry, no sleep) for a model that will never succeed."""
-
-
-def _get_client() -> Groq:
-    global _client
-    if _client is None:
-        if not GROQ_API_KEY:
-            raise RuntimeError("GROQ_API_KEY is not set. Copy .env.example to .env and fill it in.")
-        _client = Groq(api_key=GROQ_API_KEY)
-    return _client
+    """Raised when a model/key combination will never succeed (dead model, or all
+    configured keys are dead/rate-limited for it) - never retried, never slept on."""
 
 
 def _extract_json(text: str) -> dict:
@@ -91,48 +97,40 @@ def _extract_json(text: str) -> dict:
 def _is_retryable(exc: Exception) -> bool:
     status = getattr(exc, "status_code", None)
     if status is None:
-        # Not an API status error at all (e.g. a connection error) - worth one retry.
         return not isinstance(exc, (ValueError, TypeError))
     return status in _RETRYABLE_STATUS_CODES
 
 
-def _call_with_retry(messages: list[dict], model: str, max_retries: int = 3, temperature: float = 0.1) -> str:
-    if model in _DEAD_MODELS:
-        raise ModelUnavailableError(f"Model '{model}' was already confirmed unavailable this run - not retrying.")
+def _key_is_usable(key_index: int, model: str) -> bool:
+    if model in _DEAD_MODELS.get(key_index, ()):
+        return False
+    until = _RATE_LIMITED_UNTIL.get((key_index, model))
+    return not (until and time.time() < until)
 
-    rate_limited_until = _RATE_LIMITED_UNTIL.get(model)
-    if rate_limited_until and time.time() < rate_limited_until:
-        remaining = rate_limited_until - time.time()
-        raise ModelUnavailableError(
-            f"Model '{model}' hit a rate/quota limit; not retrying for another {remaining:.0f}s."
-        )
 
-    client = _get_client()
+def _call_on_key(key_index: int, messages: list[dict], model: str, max_retries: int, temperature: float) -> str:
+    client = _get_clients()[key_index]
     last_error: Exception | None = None
     for attempt in range(max_retries):
         try:
             resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
+                model=model, messages=messages, temperature=temperature,
                 response_format={"type": "json_object"},
             )
             return resp.choices[0].message.content or ""
         except APIStatusError as exc:
             last_error = exc
             if exc.status_code == 404 or not _is_retryable(exc):
-                _DEAD_MODELS.add(model)
-                raise ModelUnavailableError(f"Model '{model}' is unavailable ({exc.status_code}): {exc}") from exc
+                _DEAD_MODELS.setdefault(key_index, set()).add(model)
+                raise ModelUnavailableError(
+                    f"Model '{model}' is unavailable on key #{key_index} ({exc.status_code}): {exc}"
+                ) from exc
             if exc.status_code == 429:
                 wait = _parse_retry_after_seconds(exc)
                 if wait is not None and wait > _RATE_LIMIT_FAIL_FAST_THRESHOLD_SECONDS:
-                    # A long wait (e.g. a daily token quota, not a brief burst limit) will never
-                    # clear within our backoff window - stop every concurrent caller immediately
-                    # instead of each burning its own retries against a wall that won't move.
-                    _RATE_LIMITED_UNTIL[model] = time.time() + wait
+                    _RATE_LIMITED_UNTIL[(key_index, model)] = time.time() + wait
                     raise ModelUnavailableError(
-                        f"Model '{model}' hit a rate/quota limit requiring a {wait:.0f}s wait - failing fast "
-                        f"instead of retrying: {exc}"
+                        f"Key #{key_index} hit a rate/quota limit on '{model}' requiring a {wait:.0f}s wait: {exc}"
                     ) from exc
             if attempt < max_retries - 1:
                 time.sleep(min(2**attempt, 8))
@@ -140,7 +138,33 @@ def _call_with_retry(messages: list[dict], model: str, max_retries: int = 3, tem
             last_error = exc
             if attempt < max_retries - 1:
                 time.sleep(min(2**attempt, 8))
-    raise RuntimeError(f"Groq call failed after {max_retries} retries: {last_error}") from last_error
+    raise RuntimeError(f"Groq call failed after {max_retries} retries on key #{key_index}: {last_error}") from last_error
+
+
+def _call_with_retry(messages: list[dict], model: str, max_retries: int = 3, temperature: float = 0.1) -> str:
+    num_keys = len(_get_clients())
+    start = next(_round_robin) % num_keys
+    last_error: Exception | None = None
+    tried_any = False
+
+    for offset in range(num_keys):
+        key_index = (start + offset) % num_keys
+        if not _key_is_usable(key_index, model):
+            continue
+        tried_any = True
+        try:
+            return _call_on_key(key_index, messages, model, max_retries, temperature)
+        except ModelUnavailableError as exc:
+            last_error = exc
+            continue  # try the next key
+
+    if not tried_any:
+        raise ModelUnavailableError(
+            f"Model '{model}' is unavailable or rate-limited on all {num_keys} configured Groq key(s)."
+        )
+    raise ModelUnavailableError(
+        f"Model '{model}' failed on all {num_keys} configured Groq key(s). Last error: {last_error}"
+    ) from last_error
 
 
 def complete_json(system_prompt: str, user_prompt: str, schema: Type[T], model: str | None = None) -> T:
@@ -206,4 +230,11 @@ def complete_json_with_image(
 
 
 def is_model_dead(model: str) -> bool:
-    return model in _DEAD_MODELS
+    """True only once EVERY configured key has confirmed this model unusable (permanently or
+    rate-limited) - used by callers that want to skip an API call entirely rather than pay for
+    one more attempt-and-fail when they already know no key can serve it right now."""
+    try:
+        num_keys = len(_get_clients())
+    except RuntimeError:
+        return False
+    return not any(_key_is_usable(i, model) for i in range(num_keys))
