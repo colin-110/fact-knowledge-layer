@@ -40,12 +40,21 @@ This document may be about anything - do not assume it is about any particular c
 itself tell you what facts matter."""
 
 
+# A page's raw text plus several serialized tables can easily run past several thousand
+# characters - a 6000-char cap was silently dropping tables (or even the tail of raw text)
+# on exactly the dense financial-statement pages most likely to hold the headline numbers a
+# cross-document comparison needs (found by checking a real page's length against the cap
+# directly). openai/gpt-oss-120b's context window comfortably fits this; bounded generously
+# rather than left unbounded so one pathological page can't blow out latency/cost.
+MAX_INPUT_CHARS = 20000
+
+
 def extract_facts_from_text(evidence_text: str, document_context: str = "") -> list[ExtractedFactLLM]:
     if not evidence_text or len(evidence_text.strip()) < 20:
         return []
     user_prompt = (
         f"Document context: {document_context or 'unknown'}\n\n"
-        f"Source text:\n---\n{evidence_text[:6000]}\n---\n\n"
+        f"Source text:\n---\n{evidence_text[:MAX_INPUT_CHARS]}\n---\n\n"
         f"Extract atomic facts from this passage as a JSON object with a 'facts' array."
     )
     result = complete_json(SYSTEM_PROMPT, user_prompt, FactExtractionResult)
