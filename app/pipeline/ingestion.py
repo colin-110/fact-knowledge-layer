@@ -287,13 +287,14 @@ def _relate_one_fact(row) -> int:
             continue
         if classification.relationship_type == "UNRELATED":
             continue
-        storage.insert_relationship(
+        inserted = storage.insert_relationship(
             id=ids.relationship_id(fact_a.id, fact_b.id), fact_a_id=fact_a.id, fact_b_id=fact_b.id,
             relationship_type=classification.relationship_type, confidence=classification.confidence,
             context_dimension=classification.context_dimension, reason=classification.reason,
             method="rule" if classification.confidence >= 0.9 else "llm",
         )
-        found += 1
+        if inserted:
+            found += 1
     return found
 
 
