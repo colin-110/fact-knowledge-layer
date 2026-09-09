@@ -72,7 +72,7 @@ def rule_based_classify(a: FactRecord, b: FactRecord) -> RelationshipClassificat
     rel_diff = abs(va - vb) / denom
 
     if same_scope and same_status:
-        if rel_diff <= 0.02:
+        if rel_diff <= 0.01:
             return RelationshipClassificationLLM(
                 relationship_type="CORROBORATES",
                 confidence=0.95,
