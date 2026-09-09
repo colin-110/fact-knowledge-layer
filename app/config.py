@@ -25,6 +25,12 @@ GROQ_API_KEYS = ([GROQ_API_KEY] if GROQ_API_KEY else []) + [k for k in _extra_ke
 GROQ_TEXT_MODEL = os.environ.get("GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
+# Vision fallback used when Groq has no working vision model (see app/pipeline/vision.py).
+# Free tier at https://aistudio.google.com/apikey - no billing required. Optional: leave blank
+# to skip straight to the zero-key text-clustering fallback.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_VISION_MODEL = os.environ.get("GEMINI_VISION_MODEL", "gemini-2.0-flash")
+
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
 # Pages are I/O-bound (waiting on Groq API calls), so a thread pool here is a big win -
