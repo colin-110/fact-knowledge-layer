@@ -20,6 +20,15 @@ class TestCorroboration:
         b = _fact(id="fa_earnings_deck", normalized_value=8142.0)
         result = rule_based_classify(a, b)
         assert result is not None
+
+    def test_matching_negative_values_corroborate(self):
+        # Real data from a live run: FY23 EBITDA loss stated as "(452 Cr)" in two places on the
+        # same earnings deck. Negative values must not break the rel_diff/rounding comparison.
+        a = _fact(id="fa_1", predicate="EBITDA", normalized_value=-452.0, period_label="FY23")
+        b = _fact(id="fa_2", predicate="EBITDA", normalized_value=-452.0, period_label="FY23")
+        result = rule_based_classify(a, b)
+        assert result is not None
+        assert result.relationship_type == "CORROBORATES"
         assert result.relationship_type == "CORROBORATES"
 
 
