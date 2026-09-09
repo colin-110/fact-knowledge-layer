@@ -47,13 +47,17 @@ def _build_fact_record(row) -> FactRecord:
 
 
 def _persist_facts_from_text(
-    document_id: str, document_title: str, evidence_ids: list[str], source_text: str
+    document_id: str, document_title: str, evidence_ids: list[str], source_text: str, page_number: int = 0,
 ) -> int:
     try:
         extracted = fact_extraction.extract_facts_from_text(source_text, document_context=document_title)
     except Exception as exc:  # noqa: BLE001
+        # page_number (not a hardcoded 0) makes this id unique per page - without it, many
+        # pages failing with the identical error message (e.g. a sustained rate limit) would
+        # all collide on the same deterministic id and get silently deduped by INSERT OR
+        # IGNORE, undercounting how many pages actually lost their facts to the failure.
         storage.insert_extraction_issue(
-            id=ids.evidence_id(document_id, 0, "fact_extraction_error", 0, str(exc)),
+            id=ids.evidence_id(document_id, page_number, "fact_extraction_error", 0, str(exc)),
             document_id=document_id, page_id=None, evidence_id=evidence_ids[0] if evidence_ids else None,
             issue_type="fact_extraction_error", description=str(exc)[:500], confidence=None,
         )
@@ -168,7 +172,7 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page, ru
     # one call per evidence unit - this is the single biggest reduction in LLM call count.
     if combined_text_parts:
         combined_text = "\n\n".join(combined_text_parts)
-        facts_extracted += _persist_facts_from_text(document_id, document_title, combined_evidence_ids, combined_text)
+        facts_extracted += _persist_facts_from_text(document_id, document_title, combined_evidence_ids, combined_text, page.pdf_page_number)
 
     if page.is_visually_complex:
         try:
@@ -202,7 +206,7 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page, ru
                     evidence_metas_batch.append({
                         "document_id": document_id, "evidence_id": chart_ev_id, "page": page.pdf_page_number, "content_type": "evidence",
                     })
-                    facts_extracted += _persist_facts_from_text(document_id, document_title, [chart_ev_id], spatial_text)
+                    facts_extracted += _persist_facts_from_text(document_id, document_title, [chart_ev_id], spatial_text, page.pdf_page_number)
                 if run_state.maybe_log_vision_unavailable_once(document_id, page_id):
                     storage.insert_extraction_issue(
                         id=ids.evidence_id(document_id, 0, "vision_model_unavailable", 0, GROQ_VISION_MODEL),
@@ -243,7 +247,7 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page, ru
                         confidence=chart_result.confidence,
                     )
                 else:
-                    facts_extracted += _persist_facts_from_text(document_id, document_title, [chart_ev_id], chart_summary)
+                    facts_extracted += _persist_facts_from_text(document_id, document_title, [chart_ev_id], chart_summary, page.pdf_page_number)
         except llm.ModelUnavailableError as exc:
             if run_state.maybe_log_vision_unavailable_once(document_id, page_id):
                 storage.insert_extraction_issue(
