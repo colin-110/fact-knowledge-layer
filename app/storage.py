@@ -212,14 +212,19 @@ def list_all_facts():
 
 
 def insert_relationship(id: str, fact_a_id: str, fact_b_id: str, relationship_type: str,
-                         confidence: float | None, context_dimension: str | None, reason: str | None, method: str):
+                         confidence: float | None, context_dimension: str | None, reason: str | None, method: str) -> bool:
+    """Returns True if a new row was actually inserted, False if this pair already existed
+    (e.g. the other worker thread for the reverse fact pair won the race first) - callers use
+    this rather than assuming every call persists something, since relationship candidates are
+    found from both facts' perspective and processed concurrently."""
     with db_session() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """INSERT OR IGNORE INTO relationships
                (id, fact_a_id, fact_b_id, relationship_type, confidence, context_dimension, reason, method, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (id, fact_a_id, fact_b_id, relationship_type, confidence, context_dimension, reason, method, now()),
         )
+        return cursor.rowcount > 0
 
 
 def relationship_exists(fact_a_id: str, fact_b_id: str) -> bool:
