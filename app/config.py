@@ -14,7 +14,7 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 CHARTS_DIR = DATA_DIR / "charts"
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_TEXT_MODEL = os.environ.get("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile")
+GROQ_TEXT_MODEL = os.environ.get("GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
