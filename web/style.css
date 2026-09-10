@@ -346,6 +346,10 @@ body { display: flex; min-height: 100vh; }
   background: var(--card-bg); border-left: 1px solid var(--border); box-shadow: var(--shadow-md);
   display: flex; flex-direction: column; height: 100vh; position: sticky; top: 0;
 }
+/* The browser's default [hidden]{display:none} loses to the class rule above at equal
+   specificity (author styles beat the UA stylesheet regardless of source order) - without this,
+   setting the `hidden` attribute to close the panel had no visible effect at all. */
+.pdf-panel[hidden] { display: none; }
 .pdf-panel-header {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 12px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
