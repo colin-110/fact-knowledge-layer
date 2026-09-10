@@ -30,7 +30,15 @@ import requests
 from groq import APIStatusError, Groq
 from pydantic import BaseModel, ValidationError
 
-from app.config import GEMINI_API_KEY, GEMINI_VISION_MODEL, GROQ_API_KEYS, GROQ_TEXT_MODEL, GROQ_TPM_LIMIT, GROQ_VISION_MODEL
+from app.config import (
+    GEMINI_API_KEY,
+    GEMINI_TEXT_MODEL,
+    GEMINI_VISION_MODEL,
+    GROQ_API_KEYS,
+    GROQ_TEXT_MODEL,
+    GROQ_TPM_LIMIT,
+    GROQ_VISION_MODEL,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -248,8 +256,25 @@ def _call_with_retry(messages: list[dict], model: str, max_retries: int = 3, tem
 
 
 def complete_json(system_prompt: str, user_prompt: str, schema: Type[T], model: str | None = None) -> T:
-    """Ask the text model for JSON matching `schema`, validating and repairing once if needed."""
-    model = model or GROQ_TEXT_MODEL
+    """Ask the text model for JSON matching `schema`, validating and repairing once if needed.
+
+    Falls over to Gemini (if configured) when Groq is exhausted - the same fallback chain vision
+    already used, extended to text completions since a real live run hit Groq's *daily* token
+    quota mid-session, not just a missing vision model. Gemini's free tier is generous enough
+    that this can keep fact extraction / relationship classification going for free rather than
+    stalling until Groq's quota resets."""
+    try:
+        return _complete_json_groq(system_prompt, user_prompt, schema, model or GROQ_TEXT_MODEL)
+    except ModelUnavailableError as exc:
+        if not gemini_configured():
+            raise
+        try:
+            return complete_json_gemini(system_prompt, user_prompt, schema)
+        except GeminiUnavailableError:
+            raise exc from None  # Groq is the primary provider - surface its failure, not Gemini's
+
+
+def _complete_json_groq(system_prompt: str, user_prompt: str, schema: Type[T], model: str) -> T:
     schema_hint = (
         f"Respond with ONLY a single JSON object matching this shape "
         f"(omit fields you cannot determine, do not invent values):\n{json.dumps(schema.model_json_schema())}"
@@ -341,34 +366,12 @@ def gemini_configured() -> bool:
     return bool(GEMINI_API_KEY)
 
 
-def complete_json_with_image_gemini(
-    system_prompt: str, user_prompt: str, image_bytes: bytes, schema: Type[T],
-    model: str | None = None, max_retries: int = 2,
-) -> T:
+def _gemini_generate(payload: dict, model: str, schema: Type[T], max_retries: int) -> T:
+    """Shared request/retry/parse logic for both the text-only and vision Gemini calls."""
     if not GEMINI_API_KEY:
         raise GeminiUnavailableError("GEMINI_API_KEY is not set.")
 
-    model = model or GEMINI_VISION_MODEL
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    schema_hint = (
-        f"Respond with ONLY a single JSON object matching this shape "
-        f"(omit fields you cannot determine; never invent numbers you cannot actually read):\n"
-        f"{json.dumps(schema.model_json_schema())}"
-    )
     url = _GEMINI_ENDPOINT.format(model=model)
-    payload = {
-        "systemInstruction": {"parts": [{"text": f"{system_prompt}\n\n{schema_hint}"}]},
-        "contents": [
-            {
-                "parts": [
-                    {"text": user_prompt},
-                    {"inline_data": {"mime_type": "image/png", "data": b64}},
-                ]
-            }
-        ],
-        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.1},
-    }
-
     last_error: Exception | None = None
     for attempt in range(max_retries):
         try:
@@ -398,3 +401,51 @@ def complete_json_with_image_gemini(
         time.sleep(min(2**attempt, 8))
 
     raise GeminiUnavailableError(f"Gemini call failed after {max_retries} attempts: {last_error}")
+
+
+def complete_json_with_image_gemini(
+    system_prompt: str, user_prompt: str, image_bytes: bytes, schema: Type[T],
+    model: str | None = None, max_retries: int = 2,
+) -> T:
+    model = model or GEMINI_VISION_MODEL
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    schema_hint = (
+        f"Respond with ONLY a single JSON object matching this shape "
+        f"(omit fields you cannot determine; never invent numbers you cannot actually read):\n"
+        f"{json.dumps(schema.model_json_schema())}"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": f"{system_prompt}\n\n{schema_hint}"}]},
+        "contents": [
+            {
+                "parts": [
+                    {"text": user_prompt},
+                    {"inline_data": {"mime_type": "image/png", "data": b64}},
+                ]
+            }
+        ],
+        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.1},
+    }
+    return _gemini_generate(payload, model, schema, max_retries)
+
+
+def complete_json_gemini(
+    system_prompt: str, user_prompt: str, schema: Type[T], model: str | None = None, max_retries: int = 2,
+) -> T:
+    """Text-only Gemini completion - used as a fallback for fact extraction and relationship
+    classification when Groq is exhausted (daily quota or per-minute rate limit), not just for
+    vision. Gemini's free tier is far more generous than Groq's (verified live: Groq's
+    openai/gpt-oss-120b caps at 200K tokens/day on this account, exhausted well before a
+    three-document corpus finished reprocessing), so this is a real second chance at completing
+    a run for free rather than stalling until the next day."""
+    model = model or GEMINI_TEXT_MODEL
+    schema_hint = (
+        f"Respond with ONLY a single JSON object matching this shape "
+        f"(omit fields you cannot determine, do not invent values):\n{json.dumps(schema.model_json_schema())}"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": f"{system_prompt}\n\n{schema_hint}"}]},
+        "contents": [{"parts": [{"text": user_prompt}]}],
+        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.1},
+    }
+    return _gemini_generate(payload, model, schema, max_retries)
