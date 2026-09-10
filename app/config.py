@@ -31,7 +31,7 @@ GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "meta-llama/llama-4-scou
 # account's ceiling is already blown (which cascades into every other concurrent page failing
 # too), calls are preemptively paced to stay under this budget. Set below your actual account
 # limit for headroom; raise it if you're on a paid tier with a higher ceiling.
-GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "7000"))
+GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "6000"))
 
 # Vision fallback used when Groq has no working vision model (see app/pipeline/vision.py).
 # Free tier at https://aistudio.google.com/apikey - no billing required. Optional: leave blank

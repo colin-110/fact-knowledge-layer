@@ -65,6 +65,20 @@ class _TokenBucket:
                 wait = (estimated_tokens - self._tokens) / self._rate_per_sec
             time.sleep(min(wait, 30.0))
 
+    def true_up(self, estimated_tokens: float, actual_tokens: float) -> None:
+        """Correct the running balance using the real token count the API reported for this
+        call, instead of trusting the chars/4 estimate indefinitely. That estimate runs
+        systematically low on dense, numeric/currency-heavy financial text (verified live: even
+        with acquire() pacing every call, real 429s from the account's true TPM ceiling still
+        occurred), and small per-call underestimates compound across hundreds of calls until the
+        bucket's belief drifts far enough from the account's real usage to matter. A one-line
+        correction after every call keeps the two in sync instead of letting that drift grow."""
+        diff = actual_tokens - estimated_tokens
+        if diff == 0:
+            return
+        with self._lock:
+            self._tokens = min(self._capacity, self._tokens - diff)
+
 
 _token_buckets: dict[tuple[int, str], _TokenBucket] = {}
 _token_buckets_lock = threading.Lock()
@@ -83,11 +97,15 @@ def _bucket_for(key_index: int, model: str) -> _TokenBucket:
 
 
 def _estimate_tokens(messages: list[dict]) -> float:
-    # No tokenizer dependency - chars/4 is the standard cheap approximation for English text,
-    # plus a fixed buffer for the model's own output tokens (usually a few hundred for these
-    # structured-JSON responses).
+    # No tokenizer dependency - only used as a starting guess before the bucket's true_up()
+    # corrects it with the API's own reported usage on the very first call. chars/3.6 (rather
+    # than the more common chars/4) since this content is numeric/currency-heavy financial text,
+    # which tokenizes less efficiently than plain English prose - verified live: chars/4 still
+    # let real 429s through even with acquire() pacing every call, because the two-thirds of a
+    # minute's budget a single ~20000-char page-extraction call can consume left no room for the
+    # gap between the guess and the real count.
     chars = sum(len(m["content"]) if isinstance(m["content"], str) else 0 for m in messages)
-    return chars / 4.0 + 400
+    return chars / 3.6 + 500
 
 _RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
@@ -175,6 +193,10 @@ def _call_on_key(key_index: int, messages: list[dict], model: str, max_retries: 
                 model=model, messages=messages, temperature=temperature,
                 response_format={"type": "json_object"},
             )
+            usage = getattr(resp, "usage", None)
+            actual_tokens = getattr(usage, "total_tokens", None) if usage else None
+            if actual_tokens:
+                bucket.true_up(estimated_tokens, float(actual_tokens))
             return resp.choices[0].message.content or ""
         except APIStatusError as exc:
             last_error = exc
