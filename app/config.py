@@ -25,6 +25,14 @@ GROQ_API_KEYS = ([GROQ_API_KEY] if GROQ_API_KEY else []) + [k for k in _extra_ke
 GROQ_TEXT_MODEL = os.environ.get("GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
+# Groq's free tier caps tokens-per-minute per model (observed: 8000 TPM on openai/gpt-oss-120b) -
+# far smaller than INGESTION_WORKERS concurrent large prompts can burn through in one second.
+# Rather than firing every worker's request at once and reactively backing off only after the
+# account's ceiling is already blown (which cascades into every other concurrent page failing
+# too), calls are preemptively paced to stay under this budget. Set below your actual account
+# limit for headroom; raise it if you're on a paid tier with a higher ceiling.
+GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "7000"))
+
 # Vision fallback used when Groq has no working vision model (see app/pipeline/vision.py).
 # Free tier at https://aistudio.google.com/apikey - no billing required. Optional: leave blank
 # to skip straight to the zero-key text-clustering fallback.
