@@ -30,7 +30,21 @@ Relationship types:
 - UNRELATED: the two facts are not actually about the same underlying claim, despite superficial similarity.
 
 Be conservative: only claim CORROBORATES or CONTEXT_RECONCILES if the evidence actually supports the specific \
-reason you give. If you are guessing, prefer LIKELY_CONTRADICTION or UNRELATED and say your reasoning is uncertain."""
+reason you give. If you are guessing, prefer LIKELY_CONTRADICTION or UNRELATED and say your reasoning is uncertain.
+
+Common false positives to watch for - these look like the same metric by wording alone but are UNRELATED unless \
+the evidence explicitly equates them:
+- An adjusted figure vs. its unadjusted counterpart (e.g. "Adjusted EBITDA" vs. "EBITDA", "EBITDA margin" vs. \
+  "Adj. EBITDA margin") - these are different metrics by definition, not a restatement of each other.
+- A year-over-year change vs. a quarter-over-quarter change (or any two growth rates measured over different \
+  bases/windows) - both can be true at once and are not comparable as if they were the same number.
+- An incremental/delta figure (e.g. "FY24 increase") vs. an absolute/level figure (e.g. "FY24 amount") for the \
+  same metric - a change and a level are not the same claim.
+- Two different named people, entities, or line-item categories that happen to share a predicate (e.g. two \
+  different individuals' remuneration, or two different categories of "contingent liability") - check the \
+  subject is actually the same real-world entity, not just a similar-looking label.
+- Two different metrics that both mention the same headline word (e.g. "total borrowings" vs. "total income") -
+  matching on "total ..." is not matching on the metric."""
 
 
 def _sim(a: str | None, b: str | None) -> float:
@@ -51,8 +65,47 @@ def is_plausible_pair(a: FactRecord, b: FactRecord) -> bool:
     return _sim(a.subject, b.subject) >= 0.35 and _sim(a.predicate, b.predicate) >= 0.35
 
 
+# Character-level similarity on short financial-jargon phrases is not a reliable signal of
+# "same real-world metric" - verified against a live run of the actual dataset, where genuinely
+# unrelated pairs like "total borrowings" vs "total income" (0.57), "Adj. EBITDA" vs "EBITDA"
+# (0.71), and even two different people's names ("Kapil Bharati" vs "Sahil Barua", 0.67) all
+# score well above is_plausible_pair's 0.35 candidate-generation threshold, while genuine
+# paraphrases across documents ("revenue from services" vs "revenue", 0.50) score little higher.
+# There is no threshold in between that separates the two classes - so the deterministic,
+# LLM-skipping shortcut below is restricted to near-identical wording only (the one case where
+# "same metric" needs no semantic judgment); everything else defers to the LLM, which reads the
+# actual evidence text and can tell "total borrowings" from "total income".
+_NEAR_IDENTICAL_THRESHOLD = 0.92
+
+# Overall string similarity alone still isn't enough: "express parcel shipments YoY growth" vs
+# "...QoQ growth" scores 0.94 (above the threshold above) despite being different, non-comparable
+# metrics - only two characters differ. If a marker below appears in exactly one of the two
+# predicates, that asymmetry alone means "not the same metric," regardless of how similar the
+# rest of the wording is.
+_DISTINGUISHING_MARKERS = (
+    "yoy", "y-o-y", "year-on-year", "year over year",
+    "qoq", "q-o-q", "quarter-on-quarter", "quarter over quarter",
+    "mom", "m-o-m", "month-on-month",
+    "adj", "adjusted",
+)
+
+
+def _has_asymmetric_marker(a_text: str, b_text: str) -> bool:
+    a_l, b_l = (a_text or "").lower(), (b_text or "").lower()
+    return any((marker in a_l) != (marker in b_l) for marker in _DISTINGUISHING_MARKERS)
+
+
+def _same_underlying_metric_by_wording_alone(a: FactRecord, b: FactRecord) -> bool:
+    if _has_asymmetric_marker(a.predicate, b.predicate):
+        return False
+    return _sim(a.subject, b.subject) >= _NEAR_IDENTICAL_THRESHOLD and _sim(a.predicate, b.predicate) >= _NEAR_IDENTICAL_THRESHOLD
+
+
 def rule_based_classify(a: FactRecord, b: FactRecord) -> RelationshipClassificationLLM | None:
     """Return a classification only when the deterministic rules are confident; None means 'ask the LLM'."""
+    if not _same_underlying_metric_by_wording_alone(a, b):
+        return None
+
     same_scope = (a.scope or "").strip().lower() == (b.scope or "").strip().lower()
     same_status = (a.status or "").strip().lower() == (b.status or "").strip().lower()
     same_period = _same_period(a, b)
@@ -123,6 +176,11 @@ def rule_based_classify(a: FactRecord, b: FactRecord) -> RelationshipClassificat
 
 
 def llm_classify(a: FactRecord, b: FactRecord, evidence_a: str, evidence_b: str) -> RelationshipClassificationLLM:
+    # Since the stricter same-metric gate above now sends most candidate pairs here instead of
+    # the free deterministic path, call volume is much higher - kept the evidence excerpt short
+    # (the sentence with the actual number is rarely more than a couple hundred characters from
+    # its start) so more classifications fit in a free-tier account's tight tokens-per-minute
+    # budget (see GROQ_TPM_LIMIT).
     user_prompt = f"""Fact A:
 Subject: {a.subject}
 Predicate: {a.predicate}
@@ -130,7 +188,7 @@ Period: {a.period_label}
 Scope: {a.scope}
 Status: {a.status}
 Normalized value: {a.normalized_value} {a.normalized_unit}
-Source evidence: {evidence_a[:1200]}
+Source evidence: {evidence_a[:500]}
 
 Fact B:
 Subject: {b.subject}
@@ -139,7 +197,7 @@ Period: {b.period_label}
 Scope: {b.scope}
 Status: {b.status}
 Normalized value: {b.normalized_value} {b.normalized_unit}
-Source evidence: {evidence_b[:1200]}
+Source evidence: {evidence_b[:500]}
 
 Classify the relationship between Fact A and Fact B."""
     return complete_json(SYSTEM_PROMPT, user_prompt, RelationshipClassificationLLM)

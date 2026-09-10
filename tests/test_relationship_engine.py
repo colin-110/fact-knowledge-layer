@@ -96,6 +96,44 @@ class TestAmbiguousFallsThroughToLLM:
         b = _fact(id="fa_2", normalized_value=None, normalized_unit=None)
         assert rule_based_classify(a, b) is None
 
+    def test_adjusted_vs_unadjusted_metric_is_not_deterministically_classified(self):
+        # Real false positive from a live run: the rule used to fire CONTRADICTS purely from
+        # matching scope/status/period + a numeric gap, without checking the predicates were
+        # actually the same metric. "Adj. EBITDA" and "EBITDA" are different metrics by
+        # definition - only an LLM reading the evidence should call this, not a numeric diff.
+        a = _fact(id="fa_1", predicate="Adj. EBITDA", normalized_value=76.0, normalized_unit="INR crore")
+        b = _fact(id="fa_2", predicate="EBITDA", normalized_value=127.0, normalized_unit="INR crore")
+        assert rule_based_classify(a, b) is None
+
+    def test_yoy_vs_qoq_growth_is_not_deterministically_classified(self):
+        # Real false positive: YoY and QoQ growth rates for the same metric are not directly
+        # comparable numbers - both can be true simultaneously.
+        a = _fact(id="fa_1", predicate="express parcel shipments YoY growth", normalized_value=-2.2, normalized_unit="%")
+        b = _fact(id="fa_2", predicate="express parcel shipments QoQ growth", normalized_value=-12.8, normalized_unit="%")
+        assert rule_based_classify(a, b) is None
+
+    def test_different_named_subjects_are_not_deterministically_classified(self):
+        # Real false positive: two different people's remuneration under an identical predicate
+        # string was fired as CONTRADICTS - the subjects are different real-world entities, not
+        # a wording variation of the same one.
+        a = _fact(
+            id="fa_1", subject="Kapil Bharati", predicate="remuneration salary and other employee benefits",
+            normalized_value=43.979, normalized_unit="INR crore",
+        )
+        b = _fact(
+            id="fa_2", subject="Sahil Barua", predicate="remuneration salary and other employee benefits",
+            normalized_value=35.301, normalized_unit="INR crore",
+        )
+        assert rule_based_classify(a, b) is None
+
+    def test_coincidentally_overlapping_wording_is_not_deterministically_classified(self):
+        # Real false positive: "total borrowings" vs "total income" share enough characters to
+        # score well above is_plausible_pair's candidate-generation threshold, but are not the
+        # same metric - must not be deterministically classified without evidence-grounded review.
+        a = _fact(id="fa_1", predicate="total borrowings", normalized_value=370.781, normalized_unit="INR crore")
+        b = _fact(id="fa_2", predicate="total income", normalized_value=3838.291, normalized_unit="INR crore")
+        assert rule_based_classify(a, b) is None
+
 
 class TestPlausiblePair:
     def test_similar_subject_and_predicate_is_plausible(self):

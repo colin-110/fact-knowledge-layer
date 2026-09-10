@@ -103,6 +103,46 @@ async function checkHealth() {
 }
 
 // ---------------------------------------------------------------------------
+// Source PDF side panel - opens the actual uploaded PDF (whole document, or
+// jumped straight to a specific page) inline rather than a new tab, so a fact,
+// a relationship's evidence, or a row in the Documents list all lead to the
+// same place: the real source page, not just a rendered crop.
+// ---------------------------------------------------------------------------
+
+function openPdfPanel(documentId, filename, pageNumber) {
+  const url = `/documents/${documentId}/file` + (pageNumber ? `#page=${pageNumber}` : "");
+  document.getElementById("pdf-panel-frame").src = url;
+  document.getElementById("pdf-panel-filename").textContent = filename || "Source PDF";
+  document.getElementById("pdf-panel-page").textContent = pageNumber ? `Page ${pageNumber}` : "Full document";
+  document.getElementById("pdf-panel-open-tab").href = url;
+  document.getElementById("pdf-panel").hidden = false;
+  document.getElementById("pdf-panel-backdrop").hidden = false;
+}
+
+function closePdfPanel() {
+  document.getElementById("pdf-panel").hidden = true;
+  document.getElementById("pdf-panel-backdrop").hidden = true;
+  document.getElementById("pdf-panel-frame").src = "about:blank";
+}
+
+function setupPdfPanel() {
+  document.getElementById("pdf-panel-close").addEventListener("click", closePdfPanel);
+  document.getElementById("pdf-panel-backdrop").addEventListener("click", closePdfPanel);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closePdfPanel();
+  });
+  // Delegated so it keeps working for cards re-rendered/reconciled after this listener is
+  // attached once - no need to re-bind per card.
+  document.addEventListener("click", (e) => {
+    const trigger = e.target.closest("[data-open-pdf]");
+    if (!trigger) return;
+    e.preventDefault();
+    const page = trigger.dataset.page ? Number(trigger.dataset.page) : null;
+    openPdfPanel(trigger.dataset.documentId, trigger.dataset.filename, page);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Documents tab
 // ---------------------------------------------------------------------------
 
@@ -119,8 +159,9 @@ async function refreshDocuments() {
   empty.hidden = docs.length > 0;
   for (const d of docs) {
     const tr = document.createElement("tr");
+    const title = escapeHtml(d.title || d.filename);
     tr.innerHTML = `
-      <td>${escapeHtml(d.title || d.filename)}</td>
+      <td><button type="button" class="doc-title-link" data-open-pdf data-document-id="${d.id}" data-filename="${title}">${title}</button></td>
       <td>${d.page_count ?? "-"}</td>
       <td>${escapeHtml(d.latest_job_status || "-")}</td>
       <td>${d.fact_count}</td>
@@ -311,11 +352,11 @@ function confidenceLabel(confidence) {
   return `${pct}% (low)`;
 }
 
-function sourcePageLinks(documentId, pageNumber) {
+function sourcePageLinks(documentId, filename, pageNumber) {
   const imgUrl = `/documents/${documentId}/pages/${pageNumber}/image`;
-  const pdfUrl = `/documents/${documentId}/file#page=${pageNumber}`;
+  const safeFilename = escapeHtml(filename || "");
   return `<a href="${imgUrl}" target="_blank" rel="noopener">View page image</a> ·
-          <a href="${pdfUrl}" target="_blank" rel="noopener">Open PDF at page ${pageNumber}</a>`;
+          <a href="#" data-open-pdf data-document-id="${documentId}" data-filename="${safeFilename}" data-page="${pageNumber}">Open PDF at page ${pageNumber}</a>`;
 }
 
 function renderFactCard(f) {
@@ -348,7 +389,7 @@ function renderFactCard(f) {
     block.innerHTML = `
       <div class="rel-source">Page ${ev.page_number}, ${escapeHtml(ev.evidence_type)}, method=${escapeHtml(ev.extraction_method)}, confidence=${escapeHtml(confidenceLabel(ev.confidence))}</div>
       <div>${escapeHtml((ev.text || "").slice(0, 500))}</div>
-      <div class="evidence-links">${sourcePageLinks(ev.document_id, ev.page_number)}</div>
+      <div class="evidence-links">${sourcePageLinks(ev.document_id, ev.document_filename, ev.page_number)}</div>
       ${ev.artifact_path ? `<img loading="lazy" src="/evidence/${ev.id}/artifact" alt="source page render" />` : ""}
     `;
     right.appendChild(block);
@@ -370,6 +411,15 @@ function setupRelationshipControls() {
 
 function badgeClass(type) {
   return `badge badge-${type.toLowerCase()}`;
+}
+
+function factSourceLine(f) {
+  // The first evidence unit carries the page this fact actually came from - link straight to
+  // it (opens in the side PDF panel) rather than just naming the document.
+  const ev = (f.evidence || [])[0];
+  const filename = escapeHtml(f.document_filename || "");
+  if (!ev) return filename;
+  return `<a href="#" data-open-pdf data-document-id="${f.document_id}" data-filename="${filename}" data-page="${ev.page_number}">${filename}, page ${ev.page_number}</a>`;
 }
 
 async function refreshRelationships() {
@@ -395,12 +445,12 @@ async function refreshRelationships() {
         <div>
           <strong>${escapeHtml(r.fact_a.subject)} - ${escapeHtml(r.fact_a.predicate)}</strong><br/>
           ${escapeHtml(r.fact_a.raw_value)} ${escapeHtml(r.fact_a.raw_unit || "")} · ${escapeHtml(r.fact_a.period_label || "")} · ${escapeHtml(r.fact_a.scope || "")}
-          <div class="rel-source">${escapeHtml(r.fact_a.document_filename)}</div>
+          <div class="rel-source">${factSourceLine(r.fact_a)}</div>
         </div>
         <div>
           <strong>${escapeHtml(r.fact_b.subject)} - ${escapeHtml(r.fact_b.predicate)}</strong><br/>
           ${escapeHtml(r.fact_b.raw_value)} ${escapeHtml(r.fact_b.raw_unit || "")} · ${escapeHtml(r.fact_b.period_label || "")} · ${escapeHtml(r.fact_b.scope || "")}
-          <div class="rel-source">${escapeHtml(r.fact_b.document_filename)}</div>
+          <div class="rel-source">${factSourceLine(r.fact_b)}</div>
         </div>
       </div>
       <div class="rel-reason">${escapeHtml(r.reason || "")}</div>
@@ -509,6 +559,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupFactsControls();
   setupRelationshipControls();
   setupAskForm();
+  setupPdfPanel();
 
   await checkHealth();
   refreshActiveTab();
