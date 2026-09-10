@@ -54,6 +54,28 @@ class TestTokenBucket:
         assert max(results) > 0.1  # the other has to wait for refill
 
 
+class TestTrueUp:
+    def test_underestimate_deducts_the_shortfall(self):
+        # Real live finding: chars/4 systematically underestimates dense financial text, so real
+        # 429s still occurred even with pacing. true_up() must charge the difference so the next
+        # acquire() sees the corrected balance, not the original (too-generous) estimate.
+        bucket = _TokenBucket(tokens_per_minute=6000)
+        bucket.acquire(1000)  # estimated 1000, bucket now at 5000
+        bucket.true_up(estimated_tokens=1000, actual_tokens=2000)  # actually cost 2000
+        assert bucket._tokens == 4000  # 5000 - (2000 - 1000) extra charged
+
+    def test_overestimate_refunds_the_difference(self):
+        bucket = _TokenBucket(tokens_per_minute=6000)
+        bucket.acquire(1000)  # bucket now at 5000
+        bucket.true_up(estimated_tokens=1000, actual_tokens=600)  # actually cost less
+        assert bucket._tokens == 5400  # 5000 + 400 refunded
+
+    def test_correction_never_exceeds_capacity(self):
+        bucket = _TokenBucket(tokens_per_minute=6000)
+        bucket.true_up(estimated_tokens=1000, actual_tokens=1)  # a big "refund" while already full
+        assert bucket._tokens == 6000  # capped, not over-filled
+
+
 class TestEstimateTokens:
     def test_scales_with_content_length(self):
         short = _estimate_tokens([{"role": "user", "content": "hi"}])
