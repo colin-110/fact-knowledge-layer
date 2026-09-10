@@ -111,7 +111,13 @@ async function checkHealth() {
 
 function openPdfPanel(documentId, filename, pageNumber) {
   const url = `/documents/${documentId}/file` + (pageNumber ? `#page=${pageNumber}` : "");
-  document.getElementById("pdf-panel-frame").src = url;
+  const frame = document.getElementById("pdf-panel-frame");
+  // Jumping between two pages of the SAME document only changes the #page=N fragment - browsers
+  // routinely treat that as a same-document fragment navigation and silently skip re-jumping
+  // the PDF viewer to the new page when src is reassigned programmatically. Forcing a real
+  // reload (clear src, then set it on the next tick) makes every jump a fresh navigation.
+  frame.src = "about:blank";
+  requestAnimationFrame(() => { frame.src = url; });
   document.getElementById("pdf-panel-filename").textContent = filename || "Source PDF";
   document.getElementById("pdf-panel-page").textContent = pageNumber ? `Page ${pageNumber}` : "Full document";
   document.getElementById("pdf-panel-open-tab").href = url;
