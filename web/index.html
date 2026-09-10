@@ -59,7 +59,7 @@
           <div class="card">
             <div class="card-header">
               <h2>Upload a PDF</h2>
-              <span class="hint">Any PDF - not limited to the starter dataset</span>
+              <span class="hint">Any PDF</span>
             </div>
             <label id="dropzone" class="dropzone" for="file-input">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" class="dropzone-icon"><path d="M12 16V4M12 4 7 9M12 4l5 5"/><path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></svg>
@@ -155,6 +155,21 @@
       </main>
     </div>
   </div>
+
+  <div id="pdf-panel-backdrop" class="pdf-panel-backdrop" hidden></div>
+  <aside id="pdf-panel" class="pdf-panel" hidden>
+    <div class="pdf-panel-header">
+      <div class="pdf-panel-title">
+        <span id="pdf-panel-filename"></span>
+        <span id="pdf-panel-page" class="pdf-panel-page"></span>
+      </div>
+      <div class="pdf-panel-actions">
+        <a id="pdf-panel-open-tab" href="#" target="_blank" rel="noopener" class="pdf-panel-link">Open in new tab</a>
+        <button type="button" id="pdf-panel-close" class="pdf-panel-close" aria-label="Close PDF viewer">&times;</button>
+      </div>
+    </div>
+    <iframe id="pdf-panel-frame" class="pdf-panel-frame" title="Source PDF viewer"></iframe>
+  </aside>
 
   <script src="/static/app.js"></script>
 </body>
