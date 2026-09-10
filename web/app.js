@@ -116,18 +116,15 @@ function openPdfPanel(documentId, filename, pageNumber) {
   document.getElementById("pdf-panel-page").textContent = pageNumber ? `Page ${pageNumber}` : "Full document";
   document.getElementById("pdf-panel-open-tab").href = url;
   document.getElementById("pdf-panel").hidden = false;
-  document.getElementById("pdf-panel-backdrop").hidden = false;
 }
 
 function closePdfPanel() {
   document.getElementById("pdf-panel").hidden = true;
-  document.getElementById("pdf-panel-backdrop").hidden = true;
   document.getElementById("pdf-panel-frame").src = "about:blank";
 }
 
 function setupPdfPanel() {
   document.getElementById("pdf-panel-close").addEventListener("click", closePdfPanel);
-  document.getElementById("pdf-panel-backdrop").addEventListener("click", closePdfPanel);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closePdfPanel();
   });

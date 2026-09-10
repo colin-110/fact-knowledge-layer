@@ -91,7 +91,12 @@ def get_document_file(document_id: str):
     path = Path(doc["file_path"])
     if not path.exists():
         raise HTTPException(404, "Source PDF file missing on disk")
-    return FileResponse(path, media_type="application/pdf", filename=doc["filename"])
+    # content_disposition_type="inline" is the whole point here - FileResponse defaults to
+    # "attachment" when a filename is given, which makes the browser download the PDF instead
+    # of rendering it, so the side panel's <iframe> (and "#page=N" deep links) showed blank.
+    return FileResponse(
+        path, media_type="application/pdf", filename=doc["filename"], content_disposition_type="inline"
+    )
 
 
 @router.get("/documents/{document_id}/pages/{page_number}/image")
