@@ -308,3 +308,38 @@ def list_extraction_issues(document_id: str | None = None, limit: int = 200):
     params.append(limit)
     with db_session() as conn:
         return conn.execute(query, params).fetchall()
+
+
+def pages_with_fact_extraction_errors(document_id: str) -> set[str]:
+    """Page ids for this document that logged a fact_extraction_error - a page marked
+    'processed' does not mean its facts were actually extracted (a transient LLM failure
+    still lets the page finish and move on, by design, so one bad page can't block a whole
+    document), so a normal reprocess needs this to know which 'done' pages are actually worth
+    retrying. fact_extraction_error rows carry evidence_id, not page_id directly (the failure
+    happens per evidence unit, before a page-level id would be known), so this joins through
+    evidence to resolve it."""
+    with db_session() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT e.page_id AS page_id
+               FROM extraction_issues ei
+               JOIN evidence e ON e.id = ei.evidence_id
+               WHERE ei.document_id = ? AND ei.issue_type = 'fact_extraction_error' AND e.page_id IS NOT NULL""",
+            (document_id,),
+        ).fetchall()
+    return {r["page_id"] for r in rows}
+
+
+def clear_fact_extraction_errors(document_id: str, page_ids: set[str]) -> None:
+    """Delete stale fact_extraction_error rows for pages about to be retried, so a successful
+    retry doesn't leave a misleading 'this page failed' entry sitting in the Failures tab
+    forever alongside (or instead of) the fresh result."""
+    if not page_ids:
+        return
+    with db_session() as conn:
+        placeholders = ",".join("?" * len(page_ids))
+        conn.execute(
+            f"""DELETE FROM extraction_issues
+                WHERE document_id = ? AND issue_type = 'fact_extraction_error'
+                AND evidence_id IN (SELECT id FROM evidence WHERE page_id IN ({placeholders}))""",
+            (document_id, *page_ids),
+        )

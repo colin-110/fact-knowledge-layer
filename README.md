@@ -296,21 +296,28 @@ exactly this pair as extracted facts, and the rule engine classified them automa
 }
 ```
 
-### 3. CONTEXT_RECONCILES - India real GDP growth, FY25
+### 3. CONTEXT_RECONCILES - Delhivery revenue, split by business segment
 
-- **Economic Survey 2024-25** (`01-india-economic-survey-2024-25-excerpt.pdf`, p.4): *"As per the first advance
-  estimates of national accounts, India's real GDP is estimated to grow by 6.4 per cent in FY25."*
-- **RBI Annual Report 2024-25** (`02-rbi-annual-report-2024-25-excerpt.pdf`, p.8): *"...real gross domestic
-  product (GDP) growth moderated to 6.5 per cent in 2024-25..."*
-- **IMF Article IV 2025** (`03-imf-india-2025-article-iv-excerpt.pdf`, p.10): *"India's real GDP grew by 6.5
-  percent in FY2024/25."*
+The Q4 FY24 Earnings Presentation reports "revenue" for multiple business lines on the same page, for the same
+fiscal years. Verified live against the actual running system (not just reasoning about the PDF) - re-ingesting
+the real Q4 deck after the false-positive fix below produced exactly this relationship, unprompted:
 
-Same subject and period once "FY25" / "2024-25" / "FY2024/25" are all normalized to the same fiscal year, but
-the Economic Survey explicitly flags its number as a *First Advance Estimate* (published before the fiscal year
-closed) while RBI and IMF report later, more complete data vintages. Different `status` -> the rule engine
-fires `CONTEXT_RECONCILES` with `context_dimension: estimate_vintage` rather than flagging a contradiction.
+```json
+{
+  "relationship_type": "CONTEXT_RECONCILES",
+  "confidence": 0.7,
+  "fact_a": { "subject": "Delhivery", "predicate": "revenue", "raw_value": "5,077", "raw_unit": "₹ Cr", "period_label": "FY24", "scope": "Express Parcel" },
+  "fact_b": { "subject": "Delhivery", "predicate": "revenue", "raw_value": "1,429", "raw_unit": "₹ Cr", "period_label": "FY24", "scope": "PTL freight" },
+  "reason": "Same metric and period but different reporting scope ('Express Parcel' vs 'PTL freight')."
+}
+```
 
-### 4. Extraction/reasoning failure - two real ones, both found by actually running the system
+Same subject, predicate, and period; the numbers differ by more than 3x, but the evidence explicitly names a
+different business segment for each (`scope` differs) - the rule engine fires `CONTEXT_RECONCILES` with
+`context_dimension: scope` deterministically, no LLM call needed. The same pair recurs correctly for FY22 and
+FY23 too (three separate relationships, one per fiscal year, all in the live corpus).
+
+### 4. Extraction/reasoning failure - five real ones, all found by actually running the system
 
 **(a) Sign lost on a parenthesized negative value.** The Annual Report states FY24 EBITDA as "1,266.41" and FY23
 as "(4,516.08)" (₹ million) - accounting notation where parentheses mean a loss. A live run extracted this as
@@ -344,6 +351,52 @@ message collided on the same id and got silently deduped by `INSERT OR IGNORE`, 
 run's, not by code review. Fixed in `app/pipeline/ingestion.py` - the failure-handling behavior is only useful
 if the failure count itself is trustworthy.
 
+**(d) Relationship reasoning: deterministic classification firing on superficially similar but unrelated
+metrics.** Auditing the live relationship output (not the code) surfaced real false `CONTRADICTS` results: two
+different people's remuneration compared as if contradictory, "Adjusted EBITDA" vs. "EBITDA" (different metrics
+by definition), YoY vs. QoQ growth rates (different time bases, not comparable), and "total borrowings" vs.
+"total income" (unrelated metrics sharing only the word "total"). Root cause: `rule_based_classify()`
+(`app/pipeline/relationship_engine.py`) fired deterministically from scope+status+period+numeric-diff alone,
+without ever confirming the two predicates were the same real-world metric - and character-level string
+similarity can't reliably tell "same metric, paraphrased" from "different metric, coincidental wording overlap"
+at any single threshold (verified: legitimate paraphrases scored as low as 0.50 similarity; false positives
+scored as high as 0.94). *Fix applied:* the deterministic shortcut now only fires on near-identical wording
+(≥0.92 similarity, with an explicit check for asymmetric qualifiers like "adjusted"/"YoY"/"QoQ" appearing in
+only one side); everything else defers to the LLM, which reads the actual evidence text. 4 regression tests
+lock in the exact false-positive pairs found. Documented here rather than claimed fully solved - the underlying
+signal (predicate wording) is inherently imperfect, and a corpus with different jargon could surface a new gap
+in the same family.
+
+**(e) A genuinely hard table layout: standalone vs. consolidated figures losing their scope tag.** The
+Prospectus's restated financial statements present standalone and consolidated figures in adjacent multi-row
+column groups (e.g. "As at and for the Financial Year ended March 31, 2021" repeated across several columns
+with no other visible label distinguishing which column is which basis). Raw text extraction scrambles these
+headers into a single run-on block, so the fact-extraction LLM has no reliable way to recover which column a
+number came from - both a standalone and a consolidated "total income" for the same period get extracted with
+the same predicate and `scope: null`, and the relationship engine (correctly, given identical wording) compares
+them, producing a real `CONTRADICTS` between two figures that aren't actually in tension - it's an extraction
+gap (garbled table structure), not a relationship-reasoning gap. *Not fixed*: the honest state is that some of
+this document's multi-basis tables don't yield a reliable `scope` today; improving pdfplumber's table detection
+specifically for this multi-header layout is the natural next step, not a prompt tweak.
+
+**(f) Groq's free-tier daily token quota, hit mid-session - and a real recovery gap it exposed.**
+Re-processing the full three-document corpus to verify (d) and (e) above ran the account's `openai/gpt-oss-120b`
+usage to its actual daily ceiling: `Rate limit reached ... on tokens per day (TPD): Limit 200000, Used 199879,
+Requested 2138`. This is a distinct constraint from the per-minute TPM limit fixed elsewhere in this doc (see
+`GROQ_TPM_LIMIT`) - no amount of per-minute pacing prevents a *daily* ceiling, and the system correctly stops
+trying rather than looping: once a key/model combination reports a long wait, every further call for it fails
+fast for that duration instead of retrying into a wall. While recovering from this, a second real bug surfaced:
+a page is marked "processed" the moment it's *attempted*, not when its facts are successfully extracted (by
+design - one bad page shouldn't block a whole document) - but that meant a plain re-upload of an already-ingested
+document silently skipped every page that had previously failed, forever, since "processed" and "succeeded" were
+being treated as the same thing. Live evidence: a rate-limited run left ~95% of a document's pages permanently
+stuck at zero facts, and re-uploading the same PDF did not retry a single one of them. *Fixed*: reprocessing now
+separately checks which "done" pages actually logged a `fact_extraction_error` (`storage.
+pages_with_fact_extraction_errors`) and retries those too, clearing the stale failure record first so a
+successful retry doesn't leave a misleading old entry behind - covered by a new integration test
+(`test_reprocessing_retries_pages_that_previously_failed_fact_extraction`). `GROQ_API_KEYS` (a second free-tier
+account) remains the practical way to avoid the daily ceiling entirely, since quota is tracked per key.
+
 ## Limitations and Next Steps
 
 **Works:**
@@ -356,18 +409,20 @@ if the failure count itself is trustworthy.
 - Rule-based relationship classification for the confident cases, LLM fallback for the rest, always shown its
   source evidence rather than reasoning from bare numbers. The 59%/60% LIKELY_CONTRADICTION case fired exactly
   as designed on a live upload of the real Annual Report (see Case 2 above).
-- 95 tests, all passing without a real API key (unit tests for the deterministic pieces, an end-to-end
+- 109 tests, all passing without a real API key (unit tests for the deterministic pieces, an end-to-end
   pipeline test with only the LLM/embedding calls mocked, a retrieval-accuracy test against the real embedding
   model, and API smoke tests covering malformed input, idempotency, and empty-state behavior).
 
 **Does not work yet / known gaps:**
 - **Groq's free-tier daily token quota (200K tokens/day) is a real, hit-in-testing constraint**, not a
-  theoretical one - a single 100-page document can burn through a meaningful fraction of it, and once hit,
-  every subsequent page fails fact extraction until the quota resets (the Failures tab shows this honestly;
-  earlier in development a bug in the failure-logging itself briefly hid how many pages were actually
-  affected - see Case 4c above). `GROQ_API_KEYS` (multiple comma-separated keys, round-robined with failover)
-  and the Gemini vision fallback both help, but don't eliminate this - a heavier daily-quota tier or a paid
-  key is the real fix for processing many large documents in one session.
+  theoretical one - a single 100-page document can burn through a meaningful fraction of it, and processing a
+  full three-document corpus in one session hit the account's actual daily ceiling (see Case 4f). Once hit,
+  every subsequent page fails fact extraction until the quota resets - re-uploading the same PDF after that now
+  correctly retries only the pages that actually failed (see Case 4f's fix), rather than needing a full
+  re-ingestion or silently staying incomplete forever. `GROQ_API_KEYS` (multiple comma-separated keys,
+  round-robined with failover) and the Gemini vision fallback both help reduce how often the ceiling is hit, but
+  don't eliminate it - a heavier daily-quota tier or a paid key is the real fix for processing many large
+  documents in one session.
 - **Text evidence bbox is page-level, not block-level.** Tables and charts get precise bounding boxes; plain
   narrative text evidence currently points at the whole page rather than the specific sentence, so evidence
   highlighting for text facts is coarser than for tabular/chart facts. The block-level text is captured in

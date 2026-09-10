@@ -105,6 +105,38 @@ class TestEndToEndPipeline:
         # still exactly one fact - reprocessing didn't duplicate it
         assert len(storage.list_facts_for_document(doc_id)) == 1
 
+    def test_reprocessing_retries_pages_that_previously_failed_fact_extraction(self, tmp_path):
+        """A page marked 'processed' only means it was attempted - if its fact extraction failed
+        (e.g. a rate limit), a plain reprocess must still retry it rather than silently treating
+        'processed' as 'succeeded' forever. Live testing found this exact gap: a rate-limited run
+        left ~95% of a document's pages permanently stuck at zero facts because a normal
+        re-upload never retried them."""
+        doc_id, _ = _make_document(tmp_path, "sha_e2e_retry", "Revenue was 200 million in FY24.")
+        job_id_1 = "job_e2e_retry_a"
+        storage.create_job(id=job_id_1, document_id=doc_id)
+
+        with patch("app.pipeline.ingestion.fact_extraction.extract_facts_from_text", side_effect=RuntimeError("rate limited")), \
+             patch("app.pipeline.ingestion.embeddings.upsert"):
+            ingestion.run_document_pipeline(doc_id, job_id_1)
+
+        assert len(storage.list_facts_for_document(doc_id)) == 0
+        assert any(i["issue_type"] == "fact_extraction_error" for i in storage.list_extraction_issues(document_id=doc_id))
+
+        fake_fact = ExtractedFactLLM(
+            subject="TestCo", predicate="revenue", raw_value="200", raw_unit="million",
+            numeric_value=200.0, period_label="FY24", supporting_quote="Revenue was 200 million in FY24.",
+        )
+        job_id_2 = "job_e2e_retry_b"
+        storage.create_job(id=job_id_2, document_id=doc_id)
+        with patch("app.pipeline.ingestion.fact_extraction.extract_facts_from_text", return_value=[fake_fact]) as mock_extract, \
+             patch("app.pipeline.ingestion.embeddings.upsert"):
+            ingestion.run_document_pipeline(doc_id, job_id_2)
+            assert mock_extract.call_count == 1  # the previously-failed page was retried, not skipped
+
+        assert len(storage.list_facts_for_document(doc_id)) == 1
+        # the stale failure entry is gone now that the retry succeeded, not left alongside it
+        assert not any(i["issue_type"] == "fact_extraction_error" for i in storage.list_extraction_issues(document_id=doc_id))
+
     def test_pdf_extraction_failure_marks_job_failed_not_stuck(self, tmp_path):
         bad_pdf = tmp_path / "corrupt.pdf"
         bad_pdf.write_bytes(b"not actually a pdf")
