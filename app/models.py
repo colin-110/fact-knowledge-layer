@@ -32,7 +32,11 @@ class FactExtractionResult(BaseModel):
 class ChartExtractionLLM(BaseModel):
     """Result of sending a chart/figure crop to the vision LLM."""
 
-    has_extractable_data: bool
+    # Defaults to False rather than being required: a vision response describing why a page has
+    # nothing to extract (e.g. a cover page) is still useful and shouldn't be discarded by a
+    # schema-validation failure just because it omitted this one boolean - verified live, where
+    # exactly this omission burned a full retry-and-fail cycle instead of just meaning "no data".
+    has_extractable_data: bool = False
     title: Optional[str] = None
     chart_type: Optional[str] = None
     x_axis: Optional[str] = None
