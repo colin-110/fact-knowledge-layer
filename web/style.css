@@ -282,6 +282,9 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 .fact-card .fact-detail { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; font-size: 12.5px; }
 .fact-card .fact-detail > div > div { margin-bottom: 4px; }
 .fact-card .fact-detail .evidence-block { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
+.evidence-links { margin-top: 6px; font-size: 12px; }
+.evidence-links a { color: var(--accent); text-decoration: none; }
+.evidence-links a:hover { text-decoration: underline; }
 .fact-card img { max-width: 100%; border-radius: var(--radius-sm); margin-top: 6px; border: 1px solid var(--border); display: block; }
 @media (max-width: 700px) { .fact-card .fact-detail { grid-template-columns: 1fr; } }
 

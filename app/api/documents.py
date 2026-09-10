@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
 
 from app import ids, jobs, storage
 from app.config import UPLOADS_DIR
@@ -78,3 +79,45 @@ def get_document(document_id: str):
                 fact_count=r["fact_count"], relationship_count=r["relationship_count"],
             )
     raise HTTPException(404, "Document not found")
+
+
+@router.get("/documents/{document_id}/file")
+def get_document_file(document_id: str):
+    """Serves the original uploaded PDF - used so evidence can link straight to
+    '#page=N' in the browser's native PDF viewer, not just a static page render."""
+    doc = storage.get_document(document_id)
+    if doc is None:
+        raise HTTPException(404, "Document not found")
+    path = Path(doc["file_path"])
+    if not path.exists():
+        raise HTTPException(404, "Source PDF file missing on disk")
+    return FileResponse(path, media_type="application/pdf", filename=doc["filename"])
+
+
+@router.get("/documents/{document_id}/pages/{page_number}/image")
+def get_document_page_image(document_id: str, page_number: int, dpi: int = 150):
+    """Renders any page of the source PDF to PNG on demand - unlike chart evidence (which has
+    a pre-rendered crop saved at ingestion time), plain text/table evidence has no stored
+    image, so this lets any evidence card show its actual source page without needing one
+    stored per page up front."""
+    doc = storage.get_document(document_id)
+    if doc is None:
+        raise HTTPException(404, "Document not found")
+    path = Path(doc["file_path"])
+    if not path.exists():
+        raise HTTPException(404, "Source PDF file missing on disk")
+
+    import pymupdf
+
+    try:
+        with pymupdf.open(path) as pdf:
+            if page_number < 1 or page_number > pdf.page_count:
+                raise HTTPException(404, f"Page {page_number} out of range (document has {pdf.page_count} pages)")
+            pix = pdf[page_number - 1].get_pixmap(dpi=min(max(dpi, 72), 300))
+            png_bytes = pix.tobytes("png")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"Could not render page: {exc}") from exc
+
+    return Response(content=png_bytes, media_type="image/png")
