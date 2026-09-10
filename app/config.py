@@ -38,6 +38,10 @@ GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "6000"))
 # to skip straight to the zero-key text-clustering fallback.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_VISION_MODEL = os.environ.get("GEMINI_VISION_MODEL", "gemini-3.6-flash")
+# Also used as a text-only fallback for fact extraction/relationship classification when Groq's
+# quota (per-minute or daily) is exhausted - Gemini's free tier is far more generous, and this
+# keeps a run going for free instead of stalling until Groq's quota resets.
+GEMINI_TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
