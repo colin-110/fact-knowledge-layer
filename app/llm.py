@@ -22,6 +22,7 @@ import base64
 import itertools
 import json
 import re
+import threading
 import time
 from typing import Type, TypeVar
 
@@ -29,11 +30,64 @@ import requests
 from groq import APIStatusError, Groq
 from pydantic import BaseModel, ValidationError
 
-from app.config import GEMINI_API_KEY, GEMINI_VISION_MODEL, GROQ_API_KEYS, GROQ_TEXT_MODEL, GROQ_VISION_MODEL
+from app.config import GEMINI_API_KEY, GEMINI_VISION_MODEL, GROQ_API_KEYS, GROQ_TEXT_MODEL, GROQ_TPM_LIMIT, GROQ_VISION_MODEL
 
 T = TypeVar("T", bound=BaseModel)
 
 _clients: list[Groq] = []
+
+
+class _TokenBucket:
+    """Preemptive rate limiter: refills continuously at `tokens_per_minute / 60` per second,
+    blocks a caller until enough budget exists rather than letting requests fire freely and
+    finding out only after a 429. Shared across threads (one bucket per key+model), so
+    concurrent ingestion workers queue for their share of the budget instead of all racing
+    past it at once."""
+
+    def __init__(self, tokens_per_minute: int):
+        self._rate_per_sec = tokens_per_minute / 60.0
+        self._tokens = float(tokens_per_minute)
+        self._capacity = float(tokens_per_minute)
+        self._last_refill = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self, estimated_tokens: float) -> None:
+        estimated_tokens = min(estimated_tokens, self._capacity)  # a single call can't exceed the whole budget
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last_refill
+                self._last_refill = now
+                self._tokens = min(self._capacity, self._tokens + elapsed * self._rate_per_sec)
+                if self._tokens >= estimated_tokens:
+                    self._tokens -= estimated_tokens
+                    return
+                wait = (estimated_tokens - self._tokens) / self._rate_per_sec
+            time.sleep(min(wait, 30.0))
+
+
+_token_buckets: dict[tuple[int, str], _TokenBucket] = {}
+_token_buckets_lock = threading.Lock()
+
+
+def _bucket_for(key_index: int, model: str) -> _TokenBucket:
+    cache_key = (key_index, model)
+    bucket = _token_buckets.get(cache_key)
+    if bucket is None:
+        with _token_buckets_lock:
+            bucket = _token_buckets.get(cache_key)
+            if bucket is None:
+                bucket = _TokenBucket(GROQ_TPM_LIMIT)
+                _token_buckets[cache_key] = bucket
+    return bucket
+
+
+def _estimate_tokens(messages: list[dict]) -> float:
+    # No tokenizer dependency - chars/4 is the standard cheap approximation for English text,
+    # plus a fixed buffer for the model's own output tokens (usually a few hundred for these
+    # structured-JSON responses).
+    chars = sum(len(m["content"]) if isinstance(m["content"], str) else 0 for m in messages)
+    return chars / 4.0 + 400
 
 _RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
@@ -111,8 +165,11 @@ def _key_is_usable(key_index: int, model: str) -> bool:
 
 def _call_on_key(key_index: int, messages: list[dict], model: str, max_retries: int, temperature: float) -> str:
     client = _get_clients()[key_index]
+    bucket = _bucket_for(key_index, model)
+    estimated_tokens = _estimate_tokens(messages)
     last_error: Exception | None = None
     for attempt in range(max_retries):
+        bucket.acquire(estimated_tokens)
         try:
             resp = client.chat.completions.create(
                 model=model, messages=messages, temperature=temperature,
