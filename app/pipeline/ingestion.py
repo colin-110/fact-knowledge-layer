@@ -188,17 +188,24 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page, ru
             # API call), degrades to "" for scanned/rasterized pages with no text layer.
             spatial_text = spatial_text_mod.extract_clustered_text(pdf_path, page.pdf_page_number)
 
-            if not vision.vision_available():
-                # Already confirmed unusable earlier in this run (Groq dead and no Gemini key) -
-                # keep the page image (still useful for manual inspection) but don't waste a call
-                # we know will fail. Still worth a fact-extraction pass over the spatially-reflowed
-                # text, since that's strictly better-ordered than the raw text already tried above.
-                chart_ev_id = ids.evidence_id(document_id, page.pdf_page_number, "chart", 0, "vision_unavailable")
+            # Cost-order flip: a chart exported from matplotlib/PowerPoint/plotly usually has its
+            # labels and values as real PDF text objects, just scrambled in raw reading order -
+            # spatial reflow alone recovers that for free. Only pay for a vision call when the
+            # free path comes up short (genuinely rasterized charts, icon-heavy infographics with
+            # no usable text layer) or a vision provider isn't configured at all.
+            skip_vision_reason = None
+            if spatial_text_mod.is_sufficient(spatial_text):
+                skip_vision_reason = "spatial_text_sufficient"
+            elif not vision.vision_available():
+                skip_vision_reason = "vision_unavailable"
+
+            if skip_vision_reason:
+                chart_ev_id = ids.evidence_id(document_id, page.pdf_page_number, "chart", 0, spatial_text or "vision_unavailable")
                 storage.insert_evidence(
                     id=chart_ev_id, document_id=document_id, page_id=page_id, evidence_type="chart",
                     text=spatial_text or None, bbox=None, artifact_path=str(artifact_path),
                     extraction_method="spatial_text_fallback" if spatial_text else "vision_llm_unavailable",
-                    confidence=0.4 if spatial_text else None,
+                    confidence=0.6 if skip_vision_reason == "spatial_text_sufficient" else (0.4 if spatial_text else None),
                 )
                 if spatial_text and len(spatial_text) > 20:
                     evidence_ids_batch.append(chart_ev_id)
@@ -207,7 +214,10 @@ def _process_page(document_id: str, document_title: str, pdf_path: str, page, ru
                         "document_id": document_id, "evidence_id": chart_ev_id, "page": page.pdf_page_number, "content_type": "evidence",
                     })
                     facts_extracted += _persist_facts_from_text(document_id, document_title, [chart_ev_id], spatial_text, page.pdf_page_number)
-                if run_state.maybe_log_vision_unavailable_once(document_id, page_id):
+                # Only worth flagging as an issue when vision was genuinely unavailable - skipping
+                # it deliberately because the free path already had enough signal is the intended,
+                # cost-saving outcome, not a degraded one.
+                if skip_vision_reason == "vision_unavailable" and run_state.maybe_log_vision_unavailable_once(document_id, page_id):
                     storage.insert_extraction_issue(
                         id=ids.evidence_id(document_id, 0, "vision_model_unavailable", 0, GROQ_VISION_MODEL),
                         document_id=document_id, page_id=page_id, evidence_id=chart_ev_id,

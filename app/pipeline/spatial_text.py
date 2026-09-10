@@ -58,6 +58,20 @@ def _group_rows_into_clusters(rows: list[list[Word]], cluster_gap: float) -> lis
     return clusters
 
 
+def is_sufficient(text: str, min_chars: int = 60, min_digits: int = 8) -> bool:
+    """Whether the spatially-reflowed text alone is rich enough to skip a paid vision call.
+
+    Common in practice: a chart exported from matplotlib/plotly/PowerPoint has its labels and
+    values as real PDF text objects, just scrambled in raw reading order - spatial reflow
+    alone recovers that for free. Vision is reserved for pages that fail this check: genuinely
+    rasterized/scanned charts or icon-heavy infographics with no usable text layer at all.
+    This is the main lever for not paying for a vision call on every visually-complex page.
+    """
+    if len(text.strip()) < min_chars:
+        return False
+    return sum(c.isdigit() for c in text) >= min_digits
+
+
 def extract_clustered_text(pdf_path: str, pdf_page_number: int, y_tolerance: float = 3.0, cluster_gap: float = 14.0) -> str:
     """Return page text reflowed into spatially-coherent groups, blank-line separated."""
     doc = pymupdf.open(pdf_path)

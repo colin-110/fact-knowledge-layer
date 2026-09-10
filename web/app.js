@@ -257,6 +257,8 @@ function setupFactsControls() {
   document.getElementById("fact-document-filter").addEventListener("change", refreshFacts);
 }
 
+let lastFactsSignature = null;
+
 async function refreshFacts() {
   const search = document.getElementById("fact-search").value.trim();
   const documentId = document.getElementById("fact-document-filter").value;
@@ -269,16 +271,43 @@ async function refreshFacts() {
   document.getElementById("fact-count").textContent = facts.length
     ? `${facts.length} fact(s)`
     : "No facts match yet - try a different search, or upload a document first.";
+
+  // Skip re-rendering entirely when nothing changed - the common case on an auto-refresh
+  // tick - so an open <details> card (or scroll position) is never disturbed. When the data
+  // really did change, re-render but restore which cards were open beforehand.
+  const signature = JSON.stringify(facts.map((f) => f.id));
+  if (signature === lastFactsSignature) return;
+  lastFactsSignature = signature;
+
   const container = document.getElementById("facts-list");
+  const openIds = new Set([...container.querySelectorAll("details[open]")].map((d) => d.dataset.factId));
   container.innerHTML = "";
   for (const f of facts.slice(0, 100)) {
-    container.appendChild(renderFactCard(f));
+    const card = renderFactCard(f);
+    if (openIds.has(f.id)) card.open = true;
+    container.appendChild(card);
   }
+}
+
+function confidenceLabel(confidence) {
+  if (confidence === null || confidence === undefined) return "not reported";
+  const pct = Math.round(confidence * 100);
+  if (confidence >= 0.85) return `${pct}% (high)`;
+  if (confidence >= 0.5) return `${pct}% (medium)`;
+  return `${pct}% (low)`;
+}
+
+function sourcePageLinks(documentId, pageNumber) {
+  const imgUrl = `/documents/${documentId}/pages/${pageNumber}/image`;
+  const pdfUrl = `/documents/${documentId}/file#page=${pageNumber}`;
+  return `<a href="${imgUrl}" target="_blank" rel="noopener">View page image</a> ·
+          <a href="${pdfUrl}" target="_blank" rel="noopener">Open PDF at page ${pageNumber}</a>`;
 }
 
 function renderFactCard(f) {
   const details = document.createElement("details");
   details.className = "fact-card";
+  details.dataset.factId = f.id;
   const value = `${f.raw_value || ""} ${f.raw_unit || ""}`.trim();
   const summary = document.createElement("summary");
   summary.textContent = `${f.subject} - ${f.predicate} = ${value}`;
@@ -293,7 +322,7 @@ function renderFactCard(f) {
     <div><strong>Period:</strong> ${escapeHtml(f.period_label || "-")}</div>
     <div><strong>Scope:</strong> ${escapeHtml(f.scope || "-")}</div>
     <div><strong>Status:</strong> ${escapeHtml(f.status || "-")}</div>
-    <div><strong>Confidence:</strong> ${escapeHtml(f.extraction_confidence)}</div>
+    <div><strong>Extraction confidence:</strong> ${escapeHtml(confidenceLabel(f.extraction_confidence))}</div>
     ${Object.keys(f.qualifiers || {}).length ? `<div><strong>Qualifiers:</strong> ${escapeHtml(JSON.stringify(f.qualifiers))}</div>` : ""}
   `;
 
@@ -303,8 +332,9 @@ function renderFactCard(f) {
     const block = document.createElement("div");
     block.className = "evidence-block";
     block.innerHTML = `
-      <div class="rel-source">Page ${ev.page_number}, ${escapeHtml(ev.evidence_type)}, method=${escapeHtml(ev.extraction_method)}, confidence=${escapeHtml(ev.confidence)}</div>
+      <div class="rel-source">Page ${ev.page_number}, ${escapeHtml(ev.evidence_type)}, method=${escapeHtml(ev.extraction_method)}, confidence=${escapeHtml(confidenceLabel(ev.confidence))}</div>
       <div>${escapeHtml((ev.text || "").slice(0, 500))}</div>
+      <div class="evidence-links">${sourcePageLinks(ev.document_id, ev.page_number)}</div>
       ${ev.artifact_path ? `<img loading="lazy" src="/evidence/${ev.id}/artifact" alt="source page render" />` : ""}
     `;
     right.appendChild(block);

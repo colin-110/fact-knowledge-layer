@@ -81,6 +81,29 @@ def _score_complexity(page: pymupdf.Page, raw_text: str) -> tuple[bool, str]:
     return is_complex, "; ".join(reasons)
 
 
+def _is_meaningful_table(rows: list[list[str | None]]) -> bool:
+    """pdfplumber's find_tables() uses line/whitespace heuristics that regularly mistake a
+    chart's scattered value labels for a table's rows and columns - the result is technically
+    a grid but mostly empty cells and single-character fragments, not real tabular data.
+    Reject that before it becomes low-quality evidence and wastes an LLM call on noise."""
+    if len(rows) < 2:
+        return False
+    col_count = max((len(r) for r in rows), default=0)
+    if col_count < 2:
+        return False
+
+    cells = [c.strip() for r in rows for c in r if c and c.strip()]
+    total_cells = sum(len(r) for r in rows)
+    if total_cells == 0 or len(cells) / total_cells < 0.35:
+        return False  # too sparse - a real table is mostly filled in
+
+    avg_cell_len = sum(len(c) for c in cells) / len(cells)
+    if avg_cell_len < 1.5 and len(cells) > 15:
+        return False  # lots of near-empty single-character fragments - scattered chart labels
+
+    return True
+
+
 def _extract_tables_for_page(pdf_path: str, page_index_0based: int) -> list[TableData]:
     tables: list[TableData] = []
     try:
@@ -90,7 +113,7 @@ def _extract_tables_for_page(pdf_path: str, page_index_0based: int) -> list[Tabl
             plumber_page = pdf.pages[page_index_0based]
             for t in plumber_page.find_tables():
                 rows = t.extract()
-                if rows and len(rows) >= 2:
+                if rows and _is_meaningful_table(rows):
                     tables.append(TableData(rows=rows, bbox=t.bbox))
     except Exception:
         return []
