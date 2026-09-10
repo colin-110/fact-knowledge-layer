@@ -272,20 +272,34 @@ async function refreshFacts() {
     ? `${facts.length} fact(s)`
     : "No facts match yet - try a different search, or upload a document first.";
 
-  // Skip re-rendering entirely when nothing changed - the common case on an auto-refresh
-  // tick - so an open <details> card (or scroll position) is never disturbed. When the data
-  // really did change, re-render but restore which cards were open beforehand.
-  const signature = JSON.stringify(facts.map((f) => f.id));
+  const visible = facts.slice(0, 100);
+  // Skip re-rendering entirely when nothing changed - the common case on an auto-refresh tick.
+  const signature = JSON.stringify(visible.map((f) => f.id));
   if (signature === lastFactsSignature) return;
   lastFactsSignature = signature;
 
   const container = document.getElementById("facts-list");
-  const openIds = new Set([...container.querySelectorAll("details[open]")].map((d) => d.dataset.factId));
-  container.innerHTML = "";
-  for (const f of facts.slice(0, 100)) {
-    const card = renderFactCard(f);
-    if (openIds.has(f.id)) card.open = true;
-    container.appendChild(card);
+  // Reconcile in place rather than wiping and rebuilding: while a document is still being
+  // ingested, new facts keep shifting everyone else's position, so the fact list changes on
+  // nearly every poll. Recreating every <details> node each time destroyed an open card's
+  // `open` state the instant it happened to land mid-poll - closing whatever the user had just
+  // expanded a moment before. Reusing existing nodes (and only moving/adding/removing what
+  // actually changed) means an open card is never torn down just because something else in
+  // the list changed.
+  const existingById = new Map([...container.children].map((el) => [el.dataset.factId, el]));
+  const keep = new Set();
+  let cursor = container.firstChild;
+  for (const f of visible) {
+    keep.add(f.id);
+    const card = existingById.get(f.id) || renderFactCard(f);
+    if (card === cursor) {
+      cursor = cursor.nextSibling;
+    } else {
+      container.insertBefore(card, cursor);
+    }
+  }
+  for (const [id, el] of existingById) {
+    if (!keep.has(id)) el.remove();
   }
 }
 
