@@ -358,11 +358,21 @@ def run_document_pipeline(document_id: str, job_id: str, on_stage_update=None):
     total_pages = len(pages)
     storage.update_job(job_id, total_pages=total_pages, stage="processing_pages")
 
+    # A page marked "processed" only means it was attempted, not that fact extraction actually
+    # succeeded - a transient LLM failure (rate limit, quota) still lets the page finish so one
+    # bad page can't block the whole document. Without this, a plain reprocess would silently
+    # skip every page that previously failed, forever - verified live, where a rate-limited run
+    # left ~95% of a document's pages "done" with zero facts, and a normal re-upload alone would
+    # never have retried them.
+    failed_page_ids = storage.pages_with_fact_extraction_errors(document_id)
+    storage.clear_fact_extraction_errors(document_id, failed_page_ids)
+
     pages_to_process = []
     already_done = 0
     for page in pages:
         existing = storage.get_page(document_id, page.pdf_page_number)
-        if existing is not None and existing["processed_at"]:
+        page_id = ids.page_id(document_id, page.pdf_page_number)
+        if existing is not None and existing["processed_at"] and page_id not in failed_page_ids:
             already_done += 1
         else:
             pages_to_process.append(page)
