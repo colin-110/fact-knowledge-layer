@@ -79,6 +79,8 @@ body {
 .app-shell {
   display: flex;
   min-height: 100vh;
+  flex: 1;
+  min-width: 0; /* lets this shrink when the PDF panel docks beside it, instead of overflowing */
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -334,23 +336,22 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 /* Source PDF side panel                                                  */
 /* ---------------------------------------------------------------------- */
 
-.pdf-panel-backdrop {
-  position: fixed; inset: 0; background: rgba(16, 24, 40, 0.45); z-index: 40;
-}
+/* Docked in the normal flex flow (body is the flex container, .app-shell and .pdf-panel are
+   siblings) rather than position:fixed overlaying the page - so opening it actually shrinks the
+   rest of the app to make room, instead of covering content up. */
+body { display: flex; min-height: 100vh; }
+
 .pdf-panel {
-  position: fixed; top: 0; right: 0; bottom: 0; z-index: 41;
-  width: min(60vw, 900px); min-width: 340px;
+  width: min(45vw, 760px); min-width: 360px; flex-shrink: 0;
   background: var(--card-bg); border-left: 1px solid var(--border); box-shadow: var(--shadow-md);
-  display: flex; flex-direction: column;
-  animation: pdf-panel-in 0.18s ease-out;
+  display: flex; flex-direction: column; height: 100vh; position: sticky; top: 0;
 }
-@keyframes pdf-panel-in { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .pdf-panel-header {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 12px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
 .pdf-panel-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-#pdf-panel-filename { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+#pdf-panel-filename { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 22vw; }
 .pdf-panel-page { font-size: 12px; color: var(--text-muted); }
 .pdf-panel-actions { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
 .pdf-panel-link { font-size: 12.5px; color: var(--accent); text-decoration: none; }
@@ -362,8 +363,13 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 .pdf-panel-close:hover { background: var(--bg); color: var(--text); }
 .pdf-panel-frame { flex: 1; border: none; width: 100%; background: var(--bg); }
 
-@media (max-width: 760px) {
-  .pdf-panel { width: 100vw; min-width: 0; }
+/* Not enough width to dock a panel and keep the app usable - overlay instead on small screens,
+   full-width so the PDF is actually readable. */
+@media (max-width: 900px) {
+  body { display: block; }
+  .pdf-panel {
+    position: fixed; inset: 0; z-index: 41; width: 100vw; min-width: 0; height: 100vh;
+  }
   #pdf-panel-filename { max-width: 60vw; }
 }
 
