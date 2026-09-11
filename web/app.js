@@ -105,23 +105,28 @@ function openPdfPanel(documentId, filename, pageNumber) {
   document.getElementById("pdf-panel-page").textContent = pageNumber ? `Page ${pageNumber}` : "Full document";
   document.getElementById("pdf-panel-open-tab").href = cleanUrl;
   document.getElementById("pdf-panel").hidden = false;
+  // The panel is position:fixed (always pinned to the viewport, independent of where the page
+  // has been scrolled to - position:sticky depended on containing-block details that broke once
+  // the facts/relationships lists grew tall enough for the panel to stop tracking scroll
+  // correctly). This class reserves space for it by margining .app-shell over instead.
+  document.body.classList.add("pdf-panel-open");
 }
 
 function closePdfPanel() {
   document.getElementById("pdf-panel").hidden = true;
   document.getElementById("pdf-panel-frame").src = "about:blank";
+  document.body.classList.remove("pdf-panel-open");
 }
 
 const PDF_PANEL_WIDTH_KEY = "pdfPanelWidthPx";
 const PDF_PANEL_MIN_WIDTH = 320;
 
 function setupPdfPanelResize() {
-  const panel = document.getElementById("pdf-panel");
   const handle = document.getElementById("pdf-panel-resize-handle");
 
   try {
     const savedWidth = Number(localStorage.getItem(PDF_PANEL_WIDTH_KEY));
-    if (savedWidth) panel.style.width = `${savedWidth}px`;
+    if (savedWidth) document.documentElement.style.setProperty("--pdf-panel-width", `${savedWidth}px`);
   } catch {
     // localStorage can throw (private browsing, disabled site data) - just use the default width.
   }
@@ -133,10 +138,11 @@ function setupPdfPanelResize() {
 
     const onMouseMove = (moveEvent) => {
       // The panel is docked on the right edge, so its width is simply the distance from the
-      // cursor to the right edge of the viewport.
+      // cursor to the right edge of the viewport. Setting the shared CSS variable resizes the
+      // panel and the reserved margin on .app-shell together, in one place.
       const maxWidth = window.innerWidth * 0.85;
       const width = Math.min(maxWidth, Math.max(PDF_PANEL_MIN_WIDTH, window.innerWidth - moveEvent.clientX));
-      panel.style.width = `${width}px`;
+      document.documentElement.style.setProperty("--pdf-panel-width", `${width}px`);
     };
     const onMouseUp = () => {
       document.removeEventListener("mousemove", onMouseMove);
@@ -144,7 +150,8 @@ function setupPdfPanelResize() {
       handle.classList.remove("dragging");
       document.body.classList.remove("pdf-panel-resizing");
       try {
-        localStorage.setItem(PDF_PANEL_WIDTH_KEY, parseInt(panel.style.width, 10));
+        const width = getComputedStyle(document.documentElement).getPropertyValue("--pdf-panel-width");
+        localStorage.setItem(PDF_PANEL_WIDTH_KEY, parseInt(width, 10));
       } catch {
         // Non-fatal - the resize itself already applied, only remembering it across reloads fails.
       }

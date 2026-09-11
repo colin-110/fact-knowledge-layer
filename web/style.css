@@ -31,6 +31,7 @@
   --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.06);
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
   --mono: "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  --pdf-panel-width: min(45vw, 760px);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -79,9 +80,14 @@ body {
 .app-shell {
   display: flex;
   min-height: 100vh;
-  flex: 1;
-  min-width: 0; /* lets this shrink when the PDF panel docks beside it, instead of overflowing */
+  /* Reserves space for the fixed-position PDF panel by margining it out of the way, rather than
+     relying on flexbox/position:sticky to keep the panel in view while the page scrolls - sticky
+     depends on containing-block details that made the panel stop tracking scroll position
+     correctly once the facts/relationships lists grew tall. A fixed panel is unambiguous: it's
+     always pinned to the viewport regardless of how anything else scrolls. */
+  transition: margin-right 0.18s ease;
 }
+body.pdf-panel-open .app-shell { margin-right: var(--pdf-panel-width); }
 
 /* ---------------------------------------------------------------- sidebar */
 
@@ -321,15 +327,11 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 /* Source PDF side panel                                                  */
 /* ---------------------------------------------------------------------- */
 
-/* Docked in the normal flex flow (body is the flex container, .app-shell and .pdf-panel are
-   siblings) rather than position:fixed overlaying the page - so opening it actually shrinks the
-   rest of the app to make room, instead of covering content up. */
-body { display: flex; min-height: 100vh; }
-
 .pdf-panel {
-  width: min(45vw, 760px); min-width: 320px; flex-shrink: 0;
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 41;
+  width: var(--pdf-panel-width); min-width: 320px;
   background: var(--card-bg); border-left: 1px solid var(--border); box-shadow: var(--shadow-md);
-  display: flex; flex-direction: column; height: 100vh; position: sticky; top: 0;
+  display: flex; flex-direction: column;
 }
 /* The browser's default [hidden]{display:none} loses to the class rule above at equal
    specificity (author styles beat the UA stylesheet regardless of source order) - without this,
@@ -363,13 +365,12 @@ body.pdf-panel-resizing .pdf-panel-frame { pointer-events: none; }
 
 /* Not enough width to dock a panel and keep the app usable - overlay instead on small screens,
    full-width so the PDF is actually readable. The resize handle doesn't apply here (width is
-   forced to 100vw), so it's hidden rather than left as a dead control. */
+   forced to 100vw), and the content shouldn't shrink further to make room since the panel
+   already covers everything. */
 @media (max-width: 900px) {
   .pdf-panel-resize-handle { display: none; }
-  body { display: block; }
-  .pdf-panel {
-    position: fixed; inset: 0; z-index: 41; width: 100vw; min-width: 0; height: 100vh;
-  }
+  body.pdf-panel-open .app-shell { margin-right: 0; }
+  .pdf-panel { inset: 0; width: 100vw; min-width: 0; }
   #pdf-panel-filename { max-width: 60vw; }
 }
 
