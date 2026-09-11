@@ -56,7 +56,7 @@ pytest tests/ -v
 
 ## Video Demo
 
-_TODO: link to a ≤3 minute demo video showing a PDF being processed and the four required cases below._
+[Watch the demo](https://drive.google.com/file/d/11Ns9VgLIaBC0U2QHDBuwt0iK0OEf-YCN/view?usp=drive_link) - a PDF being processed end-to-end and the four required cases below, shown live against the running system.
 
 ## Approach
 
