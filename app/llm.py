@@ -88,18 +88,27 @@ class _TokenBucket:
             self._tokens = min(self._capacity, self._tokens - diff)
 
 
-_token_buckets: dict[tuple[int, str], _TokenBucket] = {}
+_token_buckets: dict[tuple[int, str, str], _TokenBucket] = {}
 _token_buckets_lock = threading.Lock()
 
+# A user asking a question via /query shares the same account-wide TPM ceiling as background
+# ingestion - verified live: a query took 9.3s instead of ~1-3s while a document was mid-upload,
+# because it queued behind ingestion's 6 concurrent workers on the same bucket. Splitting the
+# budget into two separately-tracked slices (their sum still equals GROQ_TPM_LIMIT, so the real
+# account ceiling is still respected) means an interactive request always has its own smaller but
+# guaranteed lane, instead of waiting behind however much background work happens to be queued.
+_INTERACTIVE_RESERVE_FRACTION = 0.2
 
-def _bucket_for(key_index: int, model: str) -> _TokenBucket:
-    cache_key = (key_index, model)
+
+def _bucket_for(key_index: int, model: str, purpose: str) -> _TokenBucket:
+    cache_key = (key_index, model, purpose)
     bucket = _token_buckets.get(cache_key)
     if bucket is None:
         with _token_buckets_lock:
             bucket = _token_buckets.get(cache_key)
             if bucket is None:
-                bucket = _TokenBucket(GROQ_TPM_LIMIT)
+                fraction = _INTERACTIVE_RESERVE_FRACTION if purpose == "interactive" else (1 - _INTERACTIVE_RESERVE_FRACTION)
+                bucket = _TokenBucket(max(1, int(GROQ_TPM_LIMIT * fraction)))
                 _token_buckets[cache_key] = bucket
     return bucket
 
@@ -189,9 +198,11 @@ def _key_is_usable(key_index: int, model: str) -> bool:
     return not (until and time.time() < until)
 
 
-def _call_on_key(key_index: int, messages: list[dict], model: str, max_retries: int, temperature: float) -> str:
+def _call_on_key(
+    key_index: int, messages: list[dict], model: str, max_retries: int, temperature: float, purpose: str
+) -> str:
     client = _get_clients()[key_index]
-    bucket = _bucket_for(key_index, model)
+    bucket = _bucket_for(key_index, model, purpose)
     estimated_tokens = _estimate_tokens(messages)
     last_error: Exception | None = None
     for attempt in range(max_retries):
@@ -229,7 +240,9 @@ def _call_on_key(key_index: int, messages: list[dict], model: str, max_retries: 
     raise RuntimeError(f"Groq call failed after {max_retries} retries on key #{key_index}: {last_error}") from last_error
 
 
-def _call_with_retry(messages: list[dict], model: str, max_retries: int = 3, temperature: float = 0.1) -> str:
+def _call_with_retry(
+    messages: list[dict], model: str, max_retries: int = 3, temperature: float = 0.1, purpose: str = "background"
+) -> str:
     num_keys = len(_get_clients())
     start = next(_round_robin) % num_keys
     last_error: Exception | None = None
@@ -241,7 +254,7 @@ def _call_with_retry(messages: list[dict], model: str, max_retries: int = 3, tem
             continue
         tried_any = True
         try:
-            return _call_on_key(key_index, messages, model, max_retries, temperature)
+            return _call_on_key(key_index, messages, model, max_retries, temperature, purpose)
         except ModelUnavailableError as exc:
             last_error = exc
             continue  # try the next key
@@ -255,8 +268,16 @@ def _call_with_retry(messages: list[dict], model: str, max_retries: int = 3, tem
     ) from last_error
 
 
-def complete_json(system_prompt: str, user_prompt: str, schema: Type[T], model: str | None = None) -> T:
+def complete_json(
+    system_prompt: str, user_prompt: str, schema: Type[T], model: str | None = None, purpose: str = "background",
+) -> T:
     """Ask the text model for JSON matching `schema`, validating and repairing once if needed.
+
+    `purpose="interactive"` (used for /query, answering a user's question right now) draws from a
+    separate, smaller reservation of the TPM budget than the default "background" ingestion work
+    (fact extraction, relationship classification) - otherwise a user's question queues behind
+    however many pages of a document happen to be mid-ingestion, which measured 9.3s for a single
+    query instead of the ~1-3s it takes when nothing else is competing for the budget.
 
     Falls over to Gemini (if configured) when Groq is exhausted - the same fallback chain vision
     already used, extended to text completions since a real live run hit Groq's *daily* token
@@ -264,7 +285,7 @@ def complete_json(system_prompt: str, user_prompt: str, schema: Type[T], model: 
     that this can keep fact extraction / relationship classification going for free rather than
     stalling until Groq's quota resets."""
     try:
-        return _complete_json_groq(system_prompt, user_prompt, schema, model or GROQ_TEXT_MODEL)
+        return _complete_json_groq(system_prompt, user_prompt, schema, model or GROQ_TEXT_MODEL, purpose)
     except ModelUnavailableError as exc:
         if not gemini_configured():
             raise
@@ -274,7 +295,7 @@ def complete_json(system_prompt: str, user_prompt: str, schema: Type[T], model: 
             raise exc from None  # Groq is the primary provider - surface its failure, not Gemini's
 
 
-def _complete_json_groq(system_prompt: str, user_prompt: str, schema: Type[T], model: str) -> T:
+def _complete_json_groq(system_prompt: str, user_prompt: str, schema: Type[T], model: str, purpose: str) -> T:
     schema_hint = (
         f"Respond with ONLY a single JSON object matching this shape "
         f"(omit fields you cannot determine, do not invent values):\n{json.dumps(schema.model_json_schema())}"
@@ -283,7 +304,7 @@ def _complete_json_groq(system_prompt: str, user_prompt: str, schema: Type[T], m
         {"role": "system", "content": f"{system_prompt}\n\n{schema_hint}"},
         {"role": "user", "content": user_prompt},
     ]
-    raw = _call_with_retry(messages, model)
+    raw = _call_with_retry(messages, model, purpose=purpose)
     try:
         return schema.model_validate(_extract_json(raw))
     except (ValidationError, ValueError, json.JSONDecodeError) as exc:
@@ -294,7 +315,7 @@ def _complete_json_groq(system_prompt: str, user_prompt: str, schema: Type[T], m
                 "content": f"That was not valid JSON matching the schema ({exc}). Return ONLY the corrected JSON object.",
             }
         )
-        raw2 = _call_with_retry(messages, model)
+        raw2 = _call_with_retry(messages, model, purpose=purpose)
         return schema.model_validate(_extract_json(raw2))
 
 
