@@ -20,6 +20,13 @@ Rules:
 - Extract only what is explicitly stated. Never infer, compute, or guess a value that is not written down.
 - Split compound statements into separate atomic facts. "Revenue was X and EBITDA was Y" is two facts, not one.
 - Do not extract vague or non-checkable statements ("the company performed well").
+- Do not extract table-of-contents entries, section headers, running heads/footers, or navigational text (e.g. \
+  "FORWARD-LOOKING STATEMENTS ... 20" listing a section name next to a page number). A page number next to a \
+  heading is not a checkable claim about the document's subject matter - it is structure, not content. Only \
+  extract facts from the substantive body text itself.
+- Do not extract the presentation/report's own boilerplate about itself (safe-harbour notices, "this document is \
+  for information purposes only", copyright lines, disclaimers about forward-looking statements) as a fact about \
+  the company - these are legal disclaimers, not checkable claims.
 - Do not extract more than roughly 15 facts from a single passage - pick the ones that are most concrete and \
   most likely to be checkable against another document (financial figures, growth rates, headcounts, dates, \
   named entities and their status, addresses, percentages).
