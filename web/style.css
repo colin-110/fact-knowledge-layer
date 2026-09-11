@@ -143,21 +143,6 @@ body {
 .nav-item.active { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); font-weight: 600; }
 .nav-icon { width: 17px; height: 17px; flex-shrink: 0; opacity: 0.9; }
 
-.sidebar-footer { padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
-
-.api-status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  color: #9aa0b4;
-}
-.api-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex-shrink: 0; }
-.api-status.ok::before { background: var(--green); }
-.api-status.down::before { background: var(--red); }
-
 /* ------------------------------------------------------------- main area */
 
 .main-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -342,7 +327,7 @@ input[type="text"]:focus, select:focus { outline: none; border-color: var(--acce
 body { display: flex; min-height: 100vh; }
 
 .pdf-panel {
-  width: min(45vw, 760px); min-width: 360px; flex-shrink: 0;
+  width: min(45vw, 760px); min-width: 320px; flex-shrink: 0;
   background: var(--card-bg); border-left: 1px solid var(--border); box-shadow: var(--shadow-md);
   display: flex; flex-direction: column; height: 100vh; position: sticky; top: 0;
 }
@@ -367,9 +352,20 @@ body { display: flex; min-height: 100vh; }
 .pdf-panel-close:hover { background: var(--bg); color: var(--text); }
 .pdf-panel-frame { flex: 1; border: none; width: 100%; background: var(--bg); }
 
+.pdf-panel-resize-handle {
+  position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 1;
+}
+.pdf-panel-resize-handle:hover, .pdf-panel-resize-handle.dragging { background: var(--accent); opacity: 0.5; }
+/* Suppress text selection / iframe pointer capture while actively dragging, otherwise the drag
+   selects surrounding page text and the iframe swallows mousemove once the cursor crosses it. */
+body.pdf-panel-resizing { cursor: col-resize; user-select: none; }
+body.pdf-panel-resizing .pdf-panel-frame { pointer-events: none; }
+
 /* Not enough width to dock a panel and keep the app usable - overlay instead on small screens,
-   full-width so the PDF is actually readable. */
+   full-width so the PDF is actually readable. The resize handle doesn't apply here (width is
+   forced to 100vw), so it's hidden rather than left as a dead control. */
 @media (max-width: 900px) {
+  .pdf-panel-resize-handle { display: none; }
   body { display: block; }
   .pdf-panel {
     position: fixed; inset: 0; z-index: 41; width: 100vw; min-width: 0; height: 100vh;
