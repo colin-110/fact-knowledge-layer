@@ -46,6 +46,20 @@ class TestMoneyNormalization:
         assert result.normalized_value == 5594
         assert result.normalized_unit == "employees"
 
+    def test_magnitude_abbreviation_glued_directly_to_the_number(self):
+        # Real finding from auditing live output: "18.8Mn Sq ft" and "2.8Bn" (no space before the
+        # abbreviation) failed to normalize at all - a plain \b word boundary never matches right
+        # after a digit, since digits and letters are both \w with no boundary between them. This
+        # pattern is common in decks/reports where the magnitude is glued onto the number.
+        result = normalize_value_unit(18.8, "Sq ft", "18.8Mn Sq ft")
+        assert result.normalized_value == 18_800_000
+        assert result.normalized_unit == "count"
+
+    def test_billion_abbreviation_glued_directly_to_the_number(self):
+        result = normalize_value_unit(2.8, "Bn", ">2.8Bn")
+        assert result.normalized_value == 2_800_000_000
+        assert result.normalized_unit == "count"
+
     def test_none_value_returns_none(self):
         result = normalize_value_unit(None, "INR million", "")
         assert result.normalized_value is None

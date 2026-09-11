@@ -34,7 +34,11 @@ _CURRENCY_SYMBOLS = {"₹": "INR", "$": "USD", "€": "EUR", "£": "GBP"}
 def _find_magnitude_word(unit_text: str) -> str | None:
     unit_lower = unit_text.lower()
     for word in sorted(_MAGNITUDE, key=len, reverse=True):
-        if re.search(rf"\b{word}s?\b", unit_lower):
+        # A normal \b fails right after a digit (e.g. "18.8Mn", "2.8Bn") since digits and
+        # letters are both \w with no boundary between them - common in decks/reports where the
+        # magnitude abbreviation is glued straight onto the number with no space. Allow the match
+        # to start either at a real word boundary or immediately after a digit.
+        if re.search(rf"(?:\b|(?<=\d)){word}s?\b", unit_lower):
             return word
     return None
 
