@@ -8,6 +8,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import documents, facts, jobs, query, relationships
 from app.db import init_db
+from app import jobs as jobs_module
+from app import storage
 from app.jobs import start_worker
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -17,6 +19,10 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 async def lifespan(app: FastAPI):
     init_db()
     start_worker()
+    # Resume anything an unclean shutdown left mid-flight - run_document_pipeline skips pages
+    # it already finished, so this continues each job rather than leaving it stuck forever.
+    for job in storage.list_incomplete_jobs():
+        jobs_module.enqueue(job["document_id"], job["id"])
     yield
 
 
