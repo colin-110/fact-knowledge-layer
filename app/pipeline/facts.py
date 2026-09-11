@@ -38,6 +38,10 @@ Rules:
 - Financial reporting convention: a number in parentheses, e.g. "(452)" or "₹(4,516.08)", means NEGATIVE - a loss \
   or an outflow. Set "numeric_value" to the negative number (e.g. -452, -4516.08) even though "raw_value" can \
   keep the parenthesized form as written. Do not extract a parenthesized negative value as if it were positive.
+- A value prefixed with ">" or "≥" (e.g. ">2.8Bn", ">33,200") is still a real, checkable number - set "numeric_value" \
+  to that stated number (e.g. 2800000000, 33200), not null. It is a stated lower bound, not an unreadable value; \
+  note the "more than" qualifier in "qualifiers" if you want to preserve that nuance, but do not omit numeric_value \
+  just because the source phrased it as an inequality.
 
 This document may be about anything - do not assume it is about any particular company or topic. Let the text \
 itself tell you what facts matter."""
