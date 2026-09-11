@@ -8,7 +8,39 @@ pace requests so that never happens in the first place.
 import threading
 import time
 
+import pytest
+
+from app import llm
+from app.config import GROQ_TPM_LIMIT
 from app.llm import _TokenBucket, _estimate_tokens
+
+
+class TestInteractiveReservation:
+    def test_interactive_and_background_get_independent_buckets(self):
+        # Real finding: /query shared the same bucket as background ingestion, so a user's
+        # question measured 9.3s (queued behind 6 concurrent ingestion workers) instead of the
+        # ~1-3s it takes uncontested. Interactive and background purposes must not share state.
+        llm._token_buckets.clear()
+        interactive = llm._bucket_for(0, "some-model", "interactive")
+        background = llm._bucket_for(0, "some-model", "background")
+        assert interactive is not background
+
+    def test_reservations_sum_to_the_full_configured_budget(self):
+        llm._token_buckets.clear()
+        interactive = llm._bucket_for(0, "some-model", "interactive")
+        background = llm._bucket_for(0, "some-model", "background")
+        # The two slices must not exceed the account's real TPM ceiling combined - each purpose
+        # gets its own guaranteed lane, but the total is still the one number Groq enforces.
+        assert interactive._capacity + background._capacity == pytest.approx(GROQ_TPM_LIMIT, rel=0.02)
+
+    def test_draining_background_does_not_affect_interactive(self):
+        llm._token_buckets.clear()
+        interactive = llm._bucket_for(0, "some-model", "interactive")
+        background = llm._bucket_for(0, "some-model", "background")
+        background.acquire(background._capacity)  # fully drain the background lane
+        start = time.monotonic()
+        interactive.acquire(min(50, interactive._capacity))  # small ask, should be immediate
+        assert time.monotonic() - start < 0.05
 
 
 class TestTokenBucket:

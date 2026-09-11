@@ -62,7 +62,10 @@ def answer_question(question: str) -> QueryResponse:
             "Try uploading a document that covers it, or rephrase the question."
         )
     else:
-        result = complete_json(SYSTEM_PROMPT, user_prompt, AnswerLLM)
+        # A user is waiting on this one right now - draws from its own reserved slice of the
+        # rate-limit budget so it never queues behind however much background ingestion happens
+        # to be running (measured live: 9.3s instead of ~1-3s without this).
+        result = complete_json(SYSTEM_PROMPT, user_prompt, AnswerLLM, purpose="interactive")
         answer_text = result.answer
 
     facts_out = [
