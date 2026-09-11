@@ -181,7 +181,17 @@ question -> hybrid retrieval (dense Chroma search + SQLite FTS5 BM25,
   SHA-256; page/evidence/fact IDs are derived from (document, page, content). Uploading the same PDF twice is a
   no-op; reprocessing after a crash only redoes the page it was on when it died (`pages.processed_at` gates
   re-extraction). This is also what "new documents incrementally, without rebuilding all existing knowledge"
-  falls out of for free - ingesting document #7 never touches documents #1-6.
+  falls out of for free - ingesting document #7 never touches documents #1-6. On startup, the app also
+  re-enqueues any job an unclean shutdown left `queued`/`processing` (`storage.list_incomplete_jobs`), so a
+  document interrupted mid-ingestion resumes from its last completed page automatically rather than staying
+  stuck - closing the browser tab was never actually the risk here, since ingestion runs fully server-side,
+  decoupled from the client connection; only killing the server itself interrupts it.
+- **A user's question gets its own slice of the rate-limit budget.** `/query` and background ingestion both call
+  the same rate-limited Groq account, so a bulk upload running in the background could make a live question wait
+  behind however many ingestion workers were mid-call (measured live: 9.3s instead of ~1-3s). The token bucket in
+  `app/llm.py` is split per `(key, model, purpose)` into an `"interactive"` lane (20% of `GROQ_TPM_LIMIT`, used
+  only by `/query`) and a `"background"` lane (80%, ingestion), so asking a question never queues behind however
+  much processing happens to be running.
 
 ### Fact schema
 
@@ -248,8 +258,10 @@ the account could actually call via `client.models.list()`, rather than assuming
 
 The runtime LLMs the *application itself* calls (never hard-coded, always from `.env`): Groq's
 `openai/gpt-oss-120b` for text (fact extraction, normalization hints, relationship classification) and its
-configured vision model for chart/figure reads, falling over to Google Gemini (`gemini-2.0-flash`) if Groq has
-no working vision model available, and further to a zero-key spatial-text heuristic if neither is configured.
+configured vision model for chart/figure reads. Either path fails over to Google Gemini (`gemini-2.0-flash`,
+`GEMINI_API_KEY`) whenever Groq can't serve the call - a missing vision model, a per-minute rate limit, or the
+account's daily quota - and the text path falls back further still to a zero-key spatial-text heuristic if
+neither vision provider is configured.
 
 ## Four Required Cases
 
@@ -403,14 +415,18 @@ account) remains the practical way to avoid the daily ceiling entirely, since qu
 **Works:**
 - End-to-end pipeline: upload -> async processing -> evidence -> facts -> relationships -> query, all backed by
   a real job status you can poll. Confirmed on live runs against the actual starter PDFs, not just unit tests.
-- Deterministic, idempotent ingestion (safe to re-upload or resume after a crash) - confirmed with an
-  integration test that reprocesses a fully-completed document and asserts zero new LLM calls.
+- Deterministic, idempotent ingestion (safe to re-upload, resume after a crash, or - now - resume automatically
+  on the next server startup) - confirmed with an integration test that reprocesses a fully-completed document
+  and asserts zero new LLM calls, plus a storage-level test that a job left `processing` by an unclean shutdown
+  is picked back up.
 - Hybrid retrieval with RRF fusion and reranking - confirmed against a real embedding model + FTS5, including
   disambiguating two facts that share a superficial "X%" pattern but mean completely different things.
 - Rule-based relationship classification for the confident cases, LLM fallback for the rest, always shown its
   source evidence rather than reasoning from bare numbers. The 59%/60% LIKELY_CONTRADICTION case fired exactly
   as designed on a live upload of the real Annual Report (see Case 2 above).
-- 109 tests, all passing without a real API key (unit tests for the deterministic pieces, an end-to-end
+- Ask (`/query`) answers stay fast even while a bulk upload is running in the background - verified live:
+  9.3s (contended) before the interactive rate-limit lane existed, ~1-3s (uncontested, steady-state) after.
+- 120 tests, all passing without a real API key (unit tests for the deterministic pieces, an end-to-end
   pipeline test with only the LLM/embedding calls mocked, a retrieval-accuracy test against the real embedding
   model, and API smoke tests covering malformed input, idempotency, and empty-state behavior).
 
@@ -446,11 +462,17 @@ account) remains the practical way to avoid the daily ceiling entirely, since qu
   it's a real recall ceiling on a much larger corpus.
 - **No formal retrieval evaluation set.** Retrieval quality was checked by hand against the four required cases
   rather than a scored recall@k benchmark.
+- **Fact extraction is recall-biased toward numeric facts over role/relationship facts.** Auditing the live
+  Annual Report output page-by-page found 71 of 100 pages with substantial text but zero extracted facts; most
+  were legitimately boilerplate (e.g. p.25's Directors' Responsibility narrative), but p.32's CSR Committee
+  table (director names + committee roles - exactly the kind of "a director may appear active in one committee
+  but not another" fact the assignment calls out as an example) was a genuine miss. The LLM prompt currently
+  reads as more receptive to "X was ₹Y in period Z" than to qualitative role/membership facts; not fixed - a
+  prompt change with more role-table examples is the natural next step, not a retrieval or normalization issue.
 - Would like to add: block-level evidence highlighting on the actual PDF page (not just the page image), a
   small worker pool, and a lightweight UI affordance for "these look like a new predicate we haven't seen
   before" during ingestion.
 
 ## Additional Notes
 
-The repository is currently private (`https://github.com/colin-110/fact-knowledge-layer`) - grant the reviewer
-access or flip it to public before submitting.
+Repository: `https://github.com/colin-110/fact-knowledge-layer` (public).
