@@ -17,8 +17,9 @@ cp .env.example .env             # then edit .env and set GROQ_API_KEY
 ```
 
 Optional in `.env`: `GROQ_API_KEYS` (extra comma-separated Groq keys, round-robined for more throughput/quota)
-and `GEMINI_API_KEY` (free tier at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) - used only
-as a vision fallback for chart/figure pages when Groq has no working vision model on your account/tier).
+and `GEMINI_API_KEY` (free tier at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) - a fallback
+for *both* vision (chart/figure pages) and text (fact extraction, relationship classification) whenever Groq
+can't serve a call, whether that's a missing vision model, a per-minute rate limit, or a daily quota).
 
 Run it directly with the venv's own interpreter - this works the same in cmd, PowerShell, and bash, and
 sidesteps PowerShell's script-execution-policy issues with `.venv\Scripts\Activate.ps1`:
