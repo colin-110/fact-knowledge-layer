@@ -282,6 +282,15 @@ def get_latest_job_for_document(document_id: str):
         ).fetchone()
 
 
+def list_incomplete_jobs():
+    """Jobs left mid-flight by an unclean shutdown (server killed/restarted while a job was
+    queued or processing). run_document_pipeline already skips pages it previously finished,
+    so re-enqueuing these on startup resumes from where each one left off instead of forcing
+    a full restart - or, worse, leaving the job stuck at partial progress forever."""
+    with db_session() as conn:
+        return conn.execute("SELECT * FROM jobs WHERE status IN ('queued', 'processing')").fetchall()
+
+
 # ---------------------------------------------------------------------------
 # extraction issues (surfaced in the Failures UI tab)
 # ---------------------------------------------------------------------------
