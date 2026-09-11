@@ -85,24 +85,6 @@ function refreshActiveTab() {
 }
 
 // ---------------------------------------------------------------------------
-// API health
-// ---------------------------------------------------------------------------
-
-async function checkHealth() {
-  const el = document.getElementById("api-status");
-  try {
-    await apiGet("/health");
-    el.textContent = "API connected";
-    el.className = "api-status ok";
-    return true;
-  } catch {
-    el.textContent = "API unreachable - start it with: uvicorn app.main:app --reload";
-    el.className = "api-status down";
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Source PDF side panel - opens the actual uploaded PDF (whole document, or
 // jumped straight to a specific page) inline rather than a new tab, so a fact,
 // a relationship's evidence, or a row in the Documents list all lead to the
@@ -110,17 +92,18 @@ async function checkHealth() {
 // ---------------------------------------------------------------------------
 
 function openPdfPanel(documentId, filename, pageNumber) {
-  const url = `/documents/${documentId}/file` + (pageNumber ? `#page=${pageNumber}` : "");
-  const frame = document.getElementById("pdf-panel-frame");
-  // Jumping between two pages of the SAME document only changes the #page=N fragment - browsers
-  // routinely treat that as a same-document fragment navigation and silently skip re-jumping
-  // the PDF viewer to the new page when src is reassigned programmatically. Forcing a real
-  // reload (clear src, then set it on the next tick) makes every jump a fresh navigation.
-  frame.src = "about:blank";
-  requestAnimationFrame(() => { frame.src = url; });
+  const cleanUrl = `/documents/${documentId}/file` + (pageNumber ? `#page=${pageNumber}` : "");
+  // Jumping between two pages of the SAME document only changes the #page=N fragment. Browsers'
+  // built-in PDF viewers cache by URL and can restore the previously-scrolled position for a
+  // fragment-only change instead of re-honoring the new page - even after forcing an iframe
+  // reload via about:blank. Appending a cache-busting query param makes every jump a genuinely
+  // different resource, so there's nothing to reuse and the viewer always re-parses the
+  // fragment fresh.
+  const bustUrl = `/documents/${documentId}/file?_=${Date.now()}` + (pageNumber ? `#page=${pageNumber}` : "");
+  document.getElementById("pdf-panel-frame").src = bustUrl;
   document.getElementById("pdf-panel-filename").textContent = filename || "Source PDF";
   document.getElementById("pdf-panel-page").textContent = pageNumber ? `Page ${pageNumber}` : "Full document";
-  document.getElementById("pdf-panel-open-tab").href = url;
+  document.getElementById("pdf-panel-open-tab").href = cleanUrl;
   document.getElementById("pdf-panel").hidden = false;
 }
 
@@ -129,11 +112,54 @@ function closePdfPanel() {
   document.getElementById("pdf-panel-frame").src = "about:blank";
 }
 
+const PDF_PANEL_WIDTH_KEY = "pdfPanelWidthPx";
+const PDF_PANEL_MIN_WIDTH = 320;
+
+function setupPdfPanelResize() {
+  const panel = document.getElementById("pdf-panel");
+  const handle = document.getElementById("pdf-panel-resize-handle");
+
+  try {
+    const savedWidth = Number(localStorage.getItem(PDF_PANEL_WIDTH_KEY));
+    if (savedWidth) panel.style.width = `${savedWidth}px`;
+  } catch {
+    // localStorage can throw (private browsing, disabled site data) - just use the default width.
+  }
+
+  handle.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    handle.classList.add("dragging");
+    document.body.classList.add("pdf-panel-resizing");
+
+    const onMouseMove = (moveEvent) => {
+      // The panel is docked on the right edge, so its width is simply the distance from the
+      // cursor to the right edge of the viewport.
+      const maxWidth = window.innerWidth * 0.85;
+      const width = Math.min(maxWidth, Math.max(PDF_PANEL_MIN_WIDTH, window.innerWidth - moveEvent.clientX));
+      panel.style.width = `${width}px`;
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      handle.classList.remove("dragging");
+      document.body.classList.remove("pdf-panel-resizing");
+      try {
+        localStorage.setItem(PDF_PANEL_WIDTH_KEY, parseInt(panel.style.width, 10));
+      } catch {
+        // Non-fatal - the resize itself already applied, only remembering it across reloads fails.
+      }
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  });
+}
+
 function setupPdfPanel() {
   document.getElementById("pdf-panel-close").addEventListener("click", closePdfPanel);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closePdfPanel();
   });
+  setupPdfPanelResize();
   // Delegated so it keeps working for cards re-rendered/reconciled after this listener is
   // attached once - no need to re-bind per card.
   document.addEventListener("click", (e) => {
@@ -564,20 +590,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupAskForm();
   setupPdfPanel();
 
-  await checkHealth();
   refreshActiveTab();
 
   // Skip network calls while the tab isn't visible - no point polling a page nobody's
   // looking at, and it stops piling up requests in a background browser tab.
   autoRefreshTimer = setInterval(() => {
     if (document.visibilityState !== "visible") return;
-    checkHealth();
     refreshActiveTab();
   }, AUTO_REFRESH_MS);
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
-      checkHealth();
       refreshActiveTab();
     }
   });
