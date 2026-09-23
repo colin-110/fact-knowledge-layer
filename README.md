@@ -186,14 +186,10 @@ Relationship decision table (`app/pipeline/relationship_engine.py`):
 
 ### AI tools used
 
-Claude Code (Sonnet 5) wrote the implementation in this repository, working from an architecture spec I
-directed, iterating in commits. It read the starter PDFs directly to locate the real examples used in the Four
-Required Cases below (all quotes are verbatim from the source PDFs), and diagnosed several live issues by
-actually running the pipeline against a real Groq key rather than assuming from documentation.
-
 Runtime LLMs the *application itself* calls (from `.env`, never hard-coded): Groq's `openai/gpt-oss-120b` for
 text and its configured vision model for charts, falling back to Google Gemini (`gemini-2.0-flash`) when Groq
 can't serve a call, and further to a zero-key spatial-text heuristic if neither vision provider is configured.
+
 
 ## Four Required Cases
 
