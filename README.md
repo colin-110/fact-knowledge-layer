@@ -190,6 +190,7 @@ Runtime LLMs the *application itself* calls (from `.env`, never hard-coded): Gro
 text and its configured vision model for charts, falling back to Google Gemini (`gemini-2.0-flash`) when Groq
 can't serve a call, and further to a zero-key spatial-text heuristic if neither vision provider is configured.
 
+
 ## Showcase Cases
 
 _All quotes below are verbatim from the sample PDFs (page numbers as printed in the excerpts)._
