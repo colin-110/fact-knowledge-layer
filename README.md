@@ -3,10 +3,15 @@
 A personal project that extracts facts from PDFs, grounds every fact in its source evidence, and detects when
 facts across documents corroborate, contradict, or reconcile through context.
 
-## Video Demo
+<p align="center">
+  <a href="https://drive.google.com/file/d/11Ns9VgLIaBC0U2QHDBuwt0iK0OEf-YCN/view?usp=drive_link">
+    <img src="https://img.shields.io/badge/%E2%96%B6%20Watch%20the%20Demo-Video-E53935?style=for-the-badge" alt="Watch the demo video" height="48">
+  </a>
+</p>
 
-[Watch the demo](https://drive.google.com/file/d/11Ns9VgLIaBC0U2QHDBuwt0iK0OEf-YCN/view?usp=drive_link) - a PDF
-being processed end-to-end and the four showcase cases below, shown live against the running system.
+<p align="center">
+  <b>A real PDF processed end-to-end, plus the four showcase cases below, shown live against the running system.</b>
+</p>
 
 ## Setup and Run Instructions
 
